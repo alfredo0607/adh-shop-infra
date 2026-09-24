@@ -76,11 +76,15 @@ resource "aws_elasticache_user" "default" {
 # run the Lua script that makes the increment atomic, and it can do nothing
 # else. If the application is compromised, the blast radius on this cache is one
 # key prefix.
+#
+# "-@all" changes nothing, since a new user starts with no permissions, but
+# ElastiCache stores the string in that normalised form. Omitting it makes every
+# plan report an in-place update that never converges.
 resource "aws_elasticache_user" "iam" {
   user_id       = var.iam_user_name
   user_name     = var.iam_user_name
   engine        = "valkey"
-  access_string = "on ~${var.key_prefix}* +@read +@write +@scripting"
+  access_string = "on ~${var.key_prefix}* -@all +@read +@write +@scripting"
 
   authentication_mode {
     type = "iam"
