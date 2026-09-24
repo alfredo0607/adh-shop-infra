@@ -79,16 +79,41 @@ cleanup() {
 trap cleanup EXIT
 
 log "reading configuration from SSM $PARAMETER_PATH"
+
+# Built through python rather than by splitting the CLI's text output.
+#
+# A PEM key is multi-line, and an env file has no syntax for that: every line
+# after the first is read as its own variable, which docker rejects with a
+# complaint naming "-----END PRIVATE KEY-----". Tab-delimited output has the
+# same problem from the other side, since the value itself contains newlines.
+#
+# Multi-line values are therefore base64-encoded and published as <NAME>_BASE64.
+# The encoding is visible in the name, so an application reading it knows to
+# decode rather than discovering a mangled key at runtime.
 aws ssm get-parameters-by-path \
   --path "$PARAMETER_PATH" \
   --recursive \
   --with-decryption \
   --region "$REGION" \
-  --query 'Parameters[].[Name,Value]' \
-  --output text \
-  | while IFS=$'\t' read -r name value; do
-      printf '%s=%s\n' "${name##*/}" "$value"
-    done > "$ENV_FILE"
+  --output json \
+  | python3 -c '
+import base64, json, sys
+
+parameters = json.load(sys.stdin).get("Parameters", [])
+lines = []
+
+for parameter in parameters:
+    name = parameter["Name"].rsplit("/", 1)[-1]
+    value = parameter["Value"]
+
+    if "\n" in value or "\r" in value:
+        encoded = base64.b64encode(value.encode()).decode()
+        lines.append(f"{name}_BASE64={encoded}")
+    else:
+        lines.append(f"{name}={value}")
+
+sys.stdout.write("\n".join(sorted(lines)) + "\n")
+' > "$ENV_FILE"
 
 [[ -s "$ENV_FILE" ]] || fail "no parameters found under $PARAMETER_PATH"
 log "loaded $(wc -l < "$ENV_FILE") parameters"
@@ -135,26 +160,32 @@ if [[ "$healthy" -ne 1 ]]; then
 fi
 
 # ── Switch traffic ────────────────────────────────────────────────────────────
+#
 # Rewriting only the upstream file leaves the certbot-managed virtual host
 # alone. `nginx -t` runs before the reload so a malformed file can never take
-# the proxy down, and the reload itself drains existing connections rather than
-# cutting them.
-cat > "$UPSTREAM_CONF" <<UPSTREAM
+# the proxy down, and the reload drains existing connections rather than cutting
+# them.
+#
+# Written with sudo tee: the script runs as ec2-user and everything under
+# /etc/nginx belongs to root. A redirect is evaluated by the calling shell
+# before sudo would ever run, so `sudo cat > file` fails exactly as an
+# unprivileged redirect does.
+write_upstream() {
+  sudo tee "$UPSTREAM_CONF" > /dev/null <<UPSTREAM
 upstream $APP {
-    server 127.0.0.1:$GREEN_PORT;
+    server 127.0.0.1:$1;
 }
 UPSTREAM
+}
 
-if ! nginx -t 2>/dev/null; then
-  cat > "$UPSTREAM_CONF" <<UPSTREAM
-upstream $APP {
-    server 127.0.0.1:$BLUE_PORT;
-}
-UPSTREAM
+write_upstream "$GREEN_PORT"
+
+if ! sudo nginx -t 2>/dev/null; then
+  write_upstream "$BLUE_PORT"
   fail "nginx rejected the new upstream — reverted, $ACTIVE_CONTAINER still serving"
 fi
 
-systemctl reload nginx
+sudo systemctl reload nginx
 log "traffic switched to :$GREEN_PORT"
 
 DEPLOY_OK=1
