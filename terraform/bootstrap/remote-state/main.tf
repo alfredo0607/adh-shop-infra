@@ -34,15 +34,37 @@ resource "aws_s3_bucket_versioning" "state" {
   }
 }
 
+# A customer managed key rather than the AWS managed default.
+#
 # State stores resource attributes in plaintext, including anything read from
-# Secrets Manager or Parameter Store. Encryption at rest is not optional.
+# Secrets Manager or Parameter Store. With an owned key, permission to decrypt
+# is expressed in a key policy that can be audited and revoked, and every use
+# appears in CloudTrail. With the AWS managed key, anyone holding s3:GetObject
+# can read the state and nothing records that they did.
+#
+# The key costs about 1 USD/month. For the file that holds every credential in
+# the system, that is a reasonable price.
+resource "aws_kms_key" "state" {
+  description             = "Encrypts the Terraform state for ${var.project}"
+  enable_key_rotation     = true
+  deletion_window_in_days = 30
+}
+
+resource "aws_kms_alias" "state" {
+  name          = "alias/${var.project}-terraform-state"
+  target_key_id = aws_kms_key.state.key_id
+}
+
 resource "aws_s3_bucket_server_side_encryption_configuration" "state" {
   bucket = aws_s3_bucket.state.id
 
   rule {
     apply_server_side_encryption_by_default {
-      sse_algorithm = "AES256"
+      sse_algorithm     = "aws:kms"
+      kms_master_key_id = aws_kms_key.state.arn
     }
+    # Cuts KMS request cost by reusing one data key per object prefix. Without
+    # it every read and write is a billed KMS call.
     bucket_key_enabled = true
   }
 }

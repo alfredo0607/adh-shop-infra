@@ -68,6 +68,13 @@ resource "aws_s3_bucket_public_access_block" "scripts" {
   restrict_public_buckets = true
 }
 
+# AWS managed encryption is deliberate here, unlike the state bucket.
+#
+# This bucket holds shell scripts that are already public in the repository.
+# There is no secret to protect, so a customer managed key would add a monthly
+# charge and a key policy to maintain in exchange for nothing. Applying a
+# control where it buys nothing is how teams learn to ignore their scanners.
+#trivy:ignore:AWS-0132
 resource "aws_s3_bucket_server_side_encryption_configuration" "scripts" {
   bucket = aws_s3_bucket.scripts.id
 
