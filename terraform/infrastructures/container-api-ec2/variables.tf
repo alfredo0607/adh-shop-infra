@@ -144,16 +144,41 @@ variable "cdn_price_class" {
 
 # ── Deployment ────────────────────────────────────────────────────────────────
 
-variable "github_repository" {
+variable "github_repository_owner" {
   type        = string
-  description = "owner/name of the repository allowed to deploy. Null creates no deploy role"
+  description = "Account that owns the repository allowed to deploy. Null creates no deploy role"
   default     = null
 }
 
-variable "deploy_branch" {
+variable "github_repository_name" {
+  type    = string
+  default = null
+}
+
+# GitHub signs OIDC subjects with immutable ids rather than names, so a renamed
+# or re-registered repository cannot inherit this trust. Read them once with:
+#   gh api repos/<owner>/<name> --jq '{repo: .id, owner: .owner.id}'
+variable "github_owner_id" {
+  type    = number
+  default = null
+}
+
+variable "github_repository_id" {
+  type    = number
+  default = null
+}
+
+variable "deploy_environment" {
   type        = string
-  description = "The only branch whose workflow runs may deploy"
-  default     = "main"
+  description = <<-EOT
+    GitHub deployment environment permitted to assume the role.
+
+    The branch restriction lives on the environment itself, as a deployment
+    branch policy, rather than in the trust policy — a job declaring an
+    environment gets a subject naming it instead of the ref, so there is no ref
+    left here to match against.
+  EOT
+  default     = "production"
 }
 
 variable "create_oidc_provider" {

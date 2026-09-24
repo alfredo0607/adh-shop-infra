@@ -33,8 +33,12 @@ fail() { printf '[deploy] ERROR: %s\n' "$*" >&2; exit 1; }
 # Two fixed host ports per app. Whichever one nginx is not currently pointing at
 # is where the new version starts.
 
-BLUE_PORT=$(awk -F'[: ]+' '/server 127.0.0.1/ {print $4; exit}' "$UPSTREAM_CONF")
-[[ -n "$BLUE_PORT" ]] || fail "could not read the active port from $UPSTREAM_CONF"
+# Captures the digits explicitly. Splitting the line on ":" instead returns
+# "3000;" — nginx directives end in a semicolon — and every later arithmetic
+# test then fails with a syntax error rather than a wrong number.
+BLUE_PORT=$(sed -n 's/.*server[[:space:]]\{1,\}127\.0\.0\.1:\([0-9]\{1,\}\).*//p' "$UPSTREAM_CONF" | head -1)
+
+[[ "$BLUE_PORT" =~ ^[0-9]+$ ]] || fail "could not read a port from $UPSTREAM_CONF (got '${BLUE_PORT:-empty}')"
 
 # Ports are allocated in even/odd pairs by add-api.sh: the even one is blue,
 # the odd one green. Parity alone decides, with no string parsing to get wrong.
