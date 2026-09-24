@@ -37,24 +37,43 @@ keep that traffic off the public internet entirely.
 
 ## First run
 
+Nothing here asks for an account id or a bucket name. Both are derived from
+whoever is authenticated, so the state a stack writes to always belongs to the
+account it is deploying into.
+
 ```bash
+export AWS_PROFILE=<a profile with permission to create these resources>
+export AWS_REGION=us-east-1
+
 # 1. Create the state bucket. Local state, applied once.
-cd terraform/bootstrap/remote-state
-terraform init && terraform apply
+terraform -chdir=terraform/bootstrap/remote-state init
+terraform -chdir=terraform/bootstrap/remote-state apply
 
-# 2. Point the other stacks at it
-cd ../..
-cp backend.hcl.example backend.hcl      # fill in the bucket name
-
-# 3. Apply in dependency order
-for stack in network data-store container-api-ec2; do
-  cd infrastructures/$stack
-  cp terraform.tfvars.example terraform.tfvars   # where one exists
-  terraform init -backend-config=../../backend.hcl
-  terraform apply
-  cd ../..
+# 2. Apply the stacks in dependency order.
+for stack in network data-store container-api-ec2 cache; do
+  ./scripts/tf-init.sh "terraform/infrastructures/$stack"
+  terraform -chdir="terraform/infrastructures/$stack" apply
 done
+
+# 3. The storefront CDN depends on nothing; run it whenever.
+./scripts/tf-init.sh terraform/infrastructures/cdn-web-spa
+terraform -chdir=terraform/infrastructures/cdn-web-spa apply
 ```
+
+Only `container-api-ec2` takes optional input, and only to decide whether SSH is
+open at all — copy its `terraform.tfvars.example` if you want it.
+
+### Why `tf-init.sh` rather than a backend file
+
+A `backend` block cannot use variables. Terraform resolves it before the
+variable system exists, so `bucket = var.state_bucket` is invalid by design. The
+usual workaround is a `backend.hcl`, which means the account id is either
+committed to a public repository or retyped for every stack.
+
+The script derives the bucket from `sts get-caller-identity` and passes it with
+`-backend-config`, which removes both problems. Everywhere Terraform *does*
+allow interpolation — the cross-stack reads in `container-api-ec2` and `cache` —
+the name is computed in a `local` and never asked for.
 
 State locking is native to S3 (`use_lockfile = true`, Terraform 1.10+). The
 separate DynamoDB lock table older guides require is no longer needed.

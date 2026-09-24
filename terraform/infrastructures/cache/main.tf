@@ -13,7 +13,7 @@ data "terraform_remote_state" "network" {
   backend = "s3"
 
   config = {
-    bucket = var.state_bucket
+    bucket = local.state_bucket
     key    = "network/terraform.tfstate"
     region = var.region
   }
@@ -23,13 +23,16 @@ data "terraform_remote_state" "container_api" {
   backend = "s3"
 
   config = {
-    bucket = var.state_bucket
+    bucket = local.state_bucket
     key    = "container-api-ec2/terraform.tfstate"
     region = var.region
   }
 }
 
 locals {
+  # Derived rather than supplied: see bootstrap/remote-state for the naming.
+  state_bucket = "${var.project}-terraform-state-${data.aws_caller_identity.current.account_id}"
+
   cache_name    = "${var.project}-cache"
   iam_user_name = "${var.project}-cache-iam"
   account_id    = data.aws_caller_identity.current.account_id

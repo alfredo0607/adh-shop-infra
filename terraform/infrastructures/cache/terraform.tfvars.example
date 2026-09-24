@@ -1,7 +1,5 @@
 # Copy to terraform.tfvars.
 
-state_bucket = "adh-shop-terraform-state-<ACCOUNT_ID>"
-
 # Ceilings, not targets. Serverless bills by stored data and compute units and
 # neither is bounded by default.
 max_storage_gb      = 1

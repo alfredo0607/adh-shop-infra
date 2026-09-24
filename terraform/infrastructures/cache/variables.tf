@@ -8,11 +8,6 @@ variable "region" {
   default = "us-east-1"
 }
 
-variable "state_bucket" {
-  type        = string
-  description = "Bucket created by bootstrap/remote-state"
-}
-
 variable "key_prefix" {
   type        = string
   description = "Key namespace the cache identity is confined to"
