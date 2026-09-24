@@ -1,11 +1,11 @@
-# Copy to terraform.tfvars. That file is gitignored: it carries account values.
+# Everything here has a working default. Copy this file only to change one.
 
-instance_type    = "t3.micro"
-root_volume_size = 20
-
-# Leave ssh_public_key unset to disable SSH entirely and connect through
-# Session Manager, which needs no open port at all.
-# ssh_public_key = "ssh-ed25519 AAAA..."
-
-# Never 0.0.0.0/0 — the module rejects it. Use your own address.
+# SSH is open to the world by default. Narrowing it to your own address is one
+# line and removes the brute-force traffic that an open port collects.
 # allowed_ssh_cidrs = ["203.0.113.4/32"]
+
+# Provision Valkey for the rate limiter. Roughly 6-7 USD/month; unnecessary
+# while there is a single instance.
+# enable_cache = true
+
+# instance_type = "t3.small"

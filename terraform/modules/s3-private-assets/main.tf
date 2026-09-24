@@ -27,17 +27,17 @@ resource "aws_s3_bucket_ownership_controls" "this" {
   }
 }
 
-# AWS managed encryption. The objects here are a compiled front-end bundle that
-# is served publicly through the CDN anyway, so a customer managed key would add
-# a monthly charge and a key policy to maintain and protect nothing.
-#trivy:ignore:AWS-0132
 resource "aws_s3_bucket_server_side_encryption_configuration" "this" {
   bucket = aws_s3_bucket.this.id
 
   rule {
     apply_server_side_encryption_by_default {
-      sse_algorithm = "AES256"
+      sse_algorithm     = var.kms_key_arn == null ? "AES256" : "aws:kms"
+      kms_master_key_id = var.kms_key_arn
     }
+    # Reuses one data key per prefix. Without it every read is a billed KMS call,
+    # which on an image CDN is every request that misses the cache.
+    bucket_key_enabled = var.kms_key_arn != null
   }
 }
 

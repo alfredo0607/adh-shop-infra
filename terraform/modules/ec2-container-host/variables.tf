@@ -31,22 +31,33 @@ variable "root_volume_size" {
   default = 20
 }
 
-variable "public_key" {
+variable "key_pair_name" {
   type        = string
-  description = "SSH public key. Null disables SSH entirely in favour of Session Manager"
+  description = <<-EOT
+    Name of an existing EC2 key pair to attach.
+
+    Created in the AWS console or with `aws ec2 create-key-pair`, which
+    generates the pair and hands back the private half once. Referencing it by
+    name keeps the private key out of Terraform: generating it here would write
+    it into state, where it outlives the moment it was needed and is far harder
+    to rotate than a key pair that can simply be replaced.
+
+    Null attaches none, leaving Session Manager as the way in.
+  EOT
   default     = null
-  sensitive   = false
 }
 
 variable "allowed_ssh_cidrs" {
   type        = list(string)
-  description = "Source ranges permitted to reach port 22. Empty closes SSH"
-  default     = []
+  description = <<-EOT
+    Source ranges permitted to reach port 22. Empty closes the port entirely.
 
-  validation {
-    condition     = !contains(var.allowed_ssh_cidrs, "0.0.0.0/0")
-    error_message = "Refusing to open SSH to the whole internet. Use a specific CIDR, or leave the list empty and connect through Session Manager."
-  }
+    0.0.0.0/0 is accepted. It attracts credential-stuffing traffic from the
+    moment the address is reachable, so it is worth narrowing when practical —
+    but that is the operator's call, not this module's. Refusing it outright
+    only pushed the decision somewhere less visible.
+  EOT
+  default     = []
 }
 
 variable "ecr_repository_arn" {

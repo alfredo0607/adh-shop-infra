@@ -8,20 +8,26 @@ Terraform for the ADH Shop storefront. Single environment.
 terraform/
 ├── bootstrap/
 │   └── remote-state/          S3 bucket holding every other stack's state
-├── infrastructures/           Deployable stacks
-│   ├── network/               VPC, public and private tiers, gateway endpoints
-│   ├── data-store/            DynamoDB
-│   ├── container-api-ec2/     ECR, scripts bucket, container host
-│   ├── cdn-web-spa/           S3 + CloudFront for the SPA
-│   └── cache/                 Valkey, backing the rate limiter
+├── infrastructures/
+│   └── container-api-ec2/     The whole platform in one apply: network, table,
+│                              registry, host, image CDN, optional cache
 ├── modules/                   Reusable modules, one per resource group
 ├── user-data/                 Instance boot scripts, rendered by templatefile()
 └── scripts/                   Operational scripts, uploaded to S3
 ```
 
-Stacks are separated by rate of change and blast radius. The network changes
-rarely; the application changes constantly. A mistake while deploying the API
-must not be able to touch routing.
+The API platform is one stack rather than four. Separating network, data,
+registry and host was justified on blast radius — a mistake while deploying the
+application should not be able to touch routing — and that argument holds when
+separate teams own separate layers and change them at different rates. It does
+not hold here: one person owns all of it, there is one environment, and it is
+short-lived. The separation bought ceremony rather than safety, at the price of
+four applies in a fixed order that had to be remembered.
+
+The image CDN belongs here too, because it depends on the API rather than
+standing beside it: CloudFront verifies signatures the API produces, so the
+signing key pair, the key group and the parameter the API reads it from have to
+be created together or not at all.
 
 ## Network tiers
 
@@ -37,43 +43,37 @@ keep that traffic off the public internet entirely.
 
 ## First run
 
-Nothing here asks for an account id or a bucket name. Both are derived from
-whoever is authenticated, so the state a stack writes to always belongs to the
-account it is deploying into.
+Nothing asks for an account id or a bucket name. Both are derived from whoever
+is authenticated, so the state a stack writes to always belongs to the account
+it is deploying into.
 
 ```bash
-export AWS_PROFILE=<a profile with permission to create these resources>
+export AWS_PROFILE=<a profile that can create these resources>
 export AWS_REGION=us-east-1
 
-# 1. Create the state bucket. Local state, applied once.
+# 1. The state bucket. Local state, applied once.
 terraform -chdir=terraform/bootstrap/remote-state init
 terraform -chdir=terraform/bootstrap/remote-state apply
 
-# 2. Apply the stacks in dependency order.
-for stack in network data-store container-api-ec2 cache; do
-  ./scripts/tf-init.sh "terraform/infrastructures/$stack"
-  terraform -chdir="terraform/infrastructures/$stack" apply
-done
-
-# 3. The storefront CDN depends on nothing; run it whenever.
-./scripts/tf-init.sh terraform/infrastructures/cdn-web-spa
-terraform -chdir=terraform/infrastructures/cdn-web-spa apply
+# 2. The whole API platform.
+./scripts/tf-init.sh terraform/infrastructures/container-api-ec2
+terraform -chdir=terraform/infrastructures/container-api-ec2 apply
 ```
 
-Only `container-api-ec2` takes optional input, and only to decide whether SSH is
-open at all — copy its `terraform.tfvars.example` if you want it.
+That is the deployment. Every input has a working default, so
+`terraform.tfvars` is only needed to change one — narrowing SSH to a single
+address, or turning the cache on.
 
 ### Why `tf-init.sh` rather than a backend file
 
 A `backend` block cannot use variables. Terraform resolves it before the
 variable system exists, so `bucket = var.state_bucket` is invalid by design. The
 usual workaround is a `backend.hcl`, which means the account id is either
-committed to a public repository or retyped for every stack.
+committed to a public repository or retyped by hand.
 
 The script derives the bucket from `sts get-caller-identity` and passes it with
-`-backend-config`, which removes both problems. Everywhere Terraform *does*
-allow interpolation — the cross-stack reads in `container-api-ec2` and `cache` —
-the name is computed in a `local` and never asked for.
+`-backend-config`, which removes both problems and also rules out initialising
+against the wrong account's state.
 
 State locking is native to S3 (`use_lockfile = true`, Terraform 1.10+). The
 separate DynamoDB lock table older guides require is no longer needed.
@@ -134,8 +134,11 @@ credentials.
 - **Application ports are not in the security group.** Exposing one would let
   anyone reach the app directly over plain HTTP, bypassing nginx, the
   certificate and the HTTPS redirect.
-- **SSH defaults to closed**, and the module *rejects* `0.0.0.0/0`. Session
-  Manager is available through the instance role and needs no open port.
+- **SSH is open to `0.0.0.0/0` by default**, which is a deliberate choice rather
+  than an oversight: it collects credential-stuffing traffic from the moment the
+  address is reachable. `allowed_ssh_cidrs` narrows it to a single address, and
+  an empty list closes the port entirely — Session Manager still works, since it
+  needs no inbound rule.
 - **Encryption at rest** on the root volume, the state bucket, the scripts
   bucket, DynamoDB and ECR.
 - **VPC flow logs** record rejected traffic, so "was this host reached from
@@ -149,27 +152,52 @@ Runs without AWS credentials: `terraform fmt -check`, `validate` on every stack
 with `-backend=false`, `tflint`, a Trivy configuration scan, and ShellCheck over
 the operational scripts.
 
+## Image delivery
+
+Product images live in a private bucket and are served through CloudFront
+**only with a signed URL the API issues**. Possessing the address is not enough:
+the URL has to have been granted, and it expires.
+
+Two controls, and both must pass. Origin Access Control is the only path to the
+bucket, so the object cannot be fetched directly. `trusted_key_groups` on the
+distribution means an unsigned request is rejected at the edge, before the
+origin is touched.
+
+### The signing key never passes through Terraform
+
+RSA 2048, which is what CloudFront requires. Generated once, outside Terraform:
+
+```bash
+openssl genrsa -out private.pem 2048
+openssl rsa -pubout -in private.pem -out public_key.pem
+aws s3 cp private.pem s3://<scripts bucket>/keys/cloudfront/private.pem
+rm private.pem
+```
+
+Only the public half is read by Terraform, from `public_key.pem` in the stack
+directory. A public key is not a secret, so it is committed — with a `.gitignore`
+exception written as a full path rather than a filename, because `!public_key.pem`
+on its own would let a private key slip through under that name.
+
+The private half travels S3 → Parameter Store → deleted. `add-keys.sh` pulls it
+into a directory created with mode 700, writes it as a `SecureString`, and a
+trap shreds and removes that directory on any exit — success, failure or
+interrupt. The window in which a private key exists on disk is the seconds
+between those two steps.
+
+Generating it in Terraform would be fewer steps, but the key would then live in
+state: a file read on every plan, by anyone who can run one, long after the
+moment it was needed.
+
+CloudFront trusts a *key group* rather than a key. The indirection is what makes
+rotation possible: add a second key, let clients migrate, remove the first —
+with no window in which no key is valid.
+
 ## Storefront delivery
 
-The built SPA lives in a private bucket reached only through CloudFront with
-Origin Access Control, so the TLS, the security headers and the caching cannot
-be bypassed by addressing the bucket directly.
-
-Setting `api_origin_domain_name` makes CloudFront serve the API under `/api/*`
-from the same domain as the SPA. The browser then never issues a cross-origin
-request: no preflight, no `Access-Control-*` headers, one certificate, and the
-API inherits the same security headers as the front end.
-
-Two cache behaviours, because one size does not fit: `/assets/*` is cached for a
-year (the bundler puts a content hash in every filename), while `index.html`
-is not (or a release would take a day to appear). API responses are never
-cached at the edge — one customer's transaction served to another is not a
-theoretical risk.
-
-`403` and `404` are rewritten to `/index.html` with a `200` so client-side
-routing works. Without it, refreshing any page other than the root is an error.
-
-Deploy with the command printed by `terraform output deploy_command`.
+Not built yet. The SPA needs somewhere to live and it is not this CDN, whose
+distribution requires a signature on every request — a browser loading
+`index.html` has no signature to present.
 
 ## Rate limiter cache
 

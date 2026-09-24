@@ -56,9 +56,22 @@ resource "aws_vpc_security_group_ingress_rule" "https" {
   cidr_ipv4         = "0.0.0.0/0"
 }
 
-# SSH is restricted by CIDR rather than open to the world. The default is
-# deliberately not 0.0.0.0/0: an open SSH port collects credential-stuffing
-# traffic from the moment it exists.
+# SSH, opened to whatever the caller asks for — including the whole internet.
+#
+# The scanner is right to flag that, and the rule is a good one: AWS-0107
+# targets remote administration ports specifically, which is why 80 and 443 pass
+# untouched while 22 does not. An open SSH port collects credential-stuffing
+# traffic from the moment the address is reachable.
+#
+# It is accepted here because the operator asked for it, and because the module
+# is not the right place to overrule that. The narrower options remain a single
+# line away: allowed_ssh_cidrs = ["x.x.x.x/32"] restricts it to one address, and
+# an empty list removes the rule entirely while leaving Session Manager working,
+# since that needs no inbound rule at all.
+#
+# Recorded here rather than suppressed in a config file, so the next reader sees
+# the reasoning next to the decision.
+#trivy:ignore:AWS-0107
 resource "aws_vpc_security_group_ingress_rule" "ssh" {
   count = length(var.allowed_ssh_cidrs)
 
@@ -214,6 +227,30 @@ data "aws_iam_policy_document" "permissions" {
     }
   }
 
+  # add-keys.sh publishes key material pulled from the scripts bucket. Write is
+  # scoped to this project's parameter path, so a compromised host cannot
+  # overwrite another service's configuration.
+  statement {
+    sid = "PublishOwnParameters"
+    actions = [
+      "ssm:PutParameter",
+      "ssm:AddTagsToResource",
+    ]
+    resources = ["arn:aws:ssm:${var.region}:${var.account_id}:parameter${var.parameter_path}/*"]
+  }
+
+  statement {
+    sid       = "EncryptOwnParameters"
+    actions   = ["kms:Encrypt", "kms:GenerateDataKey"]
+    resources = ["*"]
+
+    condition {
+      test     = "StringEquals"
+      variable = "kms:ViaService"
+      values   = ["ssm.${var.region}.amazonaws.com"]
+    }
+  }
+
   statement {
     sid = "WriteLogs"
     actions = [
@@ -249,15 +286,6 @@ resource "aws_iam_instance_profile" "this" {
 
 # ── Instance ──────────────────────────────────────────────────────────────────
 
-resource "aws_key_pair" "this" {
-  count = var.public_key == null ? 0 : 1
-
-  key_name   = "${var.name}-key"
-  public_key = var.public_key
-
-  tags = var.tags
-}
-
 resource "aws_instance" "this" {
   ami           = data.aws_ami.amazon_linux.id
   instance_type = var.instance_type
@@ -265,7 +293,7 @@ resource "aws_instance" "this" {
 
   vpc_security_group_ids = [aws_security_group.this.id]
   iam_instance_profile   = aws_iam_instance_profile.this.name
-  key_name               = var.public_key == null ? null : aws_key_pair.this[0].key_name
+  key_name               = var.key_pair_name
 
   user_data_base64 = var.user_data_base64
   # Changing user data rebuilds the host rather than leaving it in a state that
