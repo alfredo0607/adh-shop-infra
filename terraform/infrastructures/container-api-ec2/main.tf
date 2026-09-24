@@ -15,7 +15,7 @@ data "terraform_remote_state" "network" {
   backend = "s3"
 
   config = {
-    bucket = var.state_bucket
+    bucket = local.state_bucket
     key    = "network/terraform.tfstate"
     region = var.region
   }
@@ -25,13 +25,18 @@ data "terraform_remote_state" "data_store" {
   backend = "s3"
 
   config = {
-    bucket = var.state_bucket
+    bucket = local.state_bucket
     key    = "data-store/terraform.tfstate"
     region = var.region
   }
 }
 
 locals {
+  # Derived rather than supplied. bootstrap/remote-state names the bucket
+  # "<project>-terraform-state-<account>", and the account is already known
+  # here, so asking an operator to retype it only creates a way to get it wrong.
+  state_bucket = "${var.project}-terraform-state-${data.aws_caller_identity.current.account_id}"
+
   name           = "${var.project}-container-host"
   parameter_path = "/${var.project}"
 
