@@ -42,6 +42,12 @@ resource "aws_internet_gateway" "this" {
   tags = merge(var.tags, { Name = "${var.name}-igw" })
 }
 
+# Assigning a public address is the definition of a public subnet, which is the
+# whole reason this tier exists: nginx must be reachable and certbot needs an
+# inbound connection on port 80. Trivy flags it on every public subnet ever
+# written; anything that must not be reachable goes in the private tier below,
+# which has no route to the internet gateway at all.
+#trivy:ignore:AWS-0164
 resource "aws_subnet" "public" {
   count = length(var.public_subnet_cidrs)
 

@@ -70,10 +70,55 @@ resource "aws_vpc_security_group_ingress_rule" "ssh" {
   cidr_ipv4         = var.allowed_ssh_cidrs[count.index]
 }
 
-resource "aws_vpc_security_group_egress_rule" "all" {
+# Egress is restricted by port rather than left wide open.
+#
+# The destination cannot be narrowed: the host has to reach ECR, the Let's
+# Encrypt CDN and the distribution's package mirrors, none of which publish a
+# stable address range worth pinning. What can be narrowed is the protocol, and
+# limiting it to DNS, HTTP and HTTPS removes every other outbound path — which
+# is what a compromised container would reach for to open a reverse shell or
+# exfiltrate over an unusual port.
+#
+# Trivy flags the 0.0.0.0/0 destination regardless of port. That is accurate and
+# accepted: a host that installs packages and renews certificates needs the
+# open internet. Narrowing the ports is the part that was actually available.
+#trivy:ignore:AWS-0104
+resource "aws_vpc_security_group_egress_rule" "https" {
   security_group_id = aws_security_group.this.id
-  description       = "Pull images from ECR, reach AWS APIs, renew certificates"
-  ip_protocol       = "-1"
+  description       = "ECR, AWS APIs, ACME, package mirrors"
+  ip_protocol       = "tcp"
+  from_port         = 443
+  to_port           = 443
+  cidr_ipv4         = "0.0.0.0/0"
+}
+
+#trivy:ignore:AWS-0104
+resource "aws_vpc_security_group_egress_rule" "http" {
+  security_group_id = aws_security_group.this.id
+  description       = "Package mirrors and OCSP responders that still use plain HTTP"
+  ip_protocol       = "tcp"
+  from_port         = 80
+  to_port           = 80
+  cidr_ipv4         = "0.0.0.0/0"
+}
+
+#trivy:ignore:AWS-0104
+resource "aws_vpc_security_group_egress_rule" "dns_udp" {
+  security_group_id = aws_security_group.this.id
+  description       = "DNS"
+  ip_protocol       = "udp"
+  from_port         = 53
+  to_port           = 53
+  cidr_ipv4         = "0.0.0.0/0"
+}
+
+#trivy:ignore:AWS-0104
+resource "aws_vpc_security_group_egress_rule" "dns_tcp" {
+  security_group_id = aws_security_group.this.id
+  description       = "DNS over TCP, for responses that exceed the UDP limit"
+  ip_protocol       = "tcp"
+  from_port         = 53
+  to_port           = 53
   cidr_ipv4         = "0.0.0.0/0"
 }
 
