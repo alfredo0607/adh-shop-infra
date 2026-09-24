@@ -1,0 +1,13 @@
+# Copy to terraform.tfvars. That file is gitignored: it carries account values.
+
+state_bucket = "adh-shop-terraform-state-<ACCOUNT_ID>"
+
+instance_type    = "t3.micro"
+root_volume_size = 20
+
+# Leave ssh_public_key unset to disable SSH entirely and connect through
+# Session Manager, which needs no open port at all.
+# ssh_public_key = "ssh-ed25519 AAAA..."
+
+# Never 0.0.0.0/0 — the module rejects it. Use your own address.
+# allowed_ssh_cidrs = ["203.0.113.4/32"]

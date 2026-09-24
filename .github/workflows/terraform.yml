@@ -1,0 +1,83 @@
+name: Terraform
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  static-analysis:
+    name: Format, validate, lint, scan
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: 1.10.5
+          terraform_wrapper: false
+
+      # Formatting is not a matter of taste once it is enforced: it keeps diffs
+      # about behaviour instead of whitespace.
+      - name: Format check
+        run: terraform fmt -check -recursive terraform/
+
+      # Validation needs init per stack. -backend=false avoids touching a real
+      # backend, which means this job needs no AWS credentials at all.
+      - name: Validate every stack
+        run: |
+          set -euo pipefail
+          failed=0
+          for dir in terraform/bootstrap/*/ terraform/infrastructures/*/; do
+            [ -f "$dir/versions.tf" ] || continue
+            echo "── $dir"
+            if ! (cd "$dir" && terraform init -backend=false -input=false > /dev/null && terraform validate); then
+              failed=1
+            fi
+          done
+          exit $failed
+
+      - name: Lint
+        uses: terraform-linters/setup-tflint@v4
+        with:
+          tflint_version: latest
+
+      - run: tflint --init && tflint --recursive --minimum-failure-severity=error
+        working-directory: terraform
+
+      # Fails on real misconfigurations: unencrypted volumes, open security
+      # groups, public buckets.
+      - name: Security scan
+        uses: aquasecurity/trivy-action@0.28.0
+        with:
+          scan-type: config
+          scan-ref: terraform/
+          severity: HIGH,CRITICAL
+          exit-code: '1'
+          trivy-config: trivy.yaml
+
+  shell:
+    name: Shell scripts
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # These scripts deploy and roll back production. A typo in a variable name
+      # surfaces at three in the morning otherwise.
+      - name: ShellCheck
+        run: |
+          sudo apt-get update && sudo apt-get install -y shellcheck
+          shellcheck --severity=warning \
+            terraform/scripts/container-api-ec2/*.sh

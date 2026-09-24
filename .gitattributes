@@ -1,0 +1,6 @@
+# Normalise to LF. The shell scripts here run on Amazon Linux; a CRLF leaked
+# into a shebang produces "bad interpreter: no such file or directory".
+* text=auto eol=lf
+*.sh  text eol=lf
+*.tf  text eol=lf
+*.hcl text eol=lf
