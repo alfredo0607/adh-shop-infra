@@ -198,6 +198,29 @@ module "valkey" {
   max_ecpu_per_second = var.cache_max_ecpu_per_second
 }
 
+# Lets the host reach the cache, and only the cache.
+#
+# Defined here rather than in either module, for the same reason as the bucket
+# and key policies: the host's group is an input to the cache and the cache's
+# group would be an input to the host, which is a cycle Terraform refuses to
+# plan. In the stack both exist and the rule simply references them.
+#
+# Egress from the host is bounded by protocol — DNS, HTTP, HTTPS — because the
+# hosts it reaches publish no stable ranges. This one can be bounded by
+# destination: it names a security group, so a Redis connection may go to the
+# cache and nowhere else. Referencing the group rather than an address also
+# survives the cache being replaced.
+resource "aws_vpc_security_group_egress_rule" "host_to_cache" {
+  count = var.enable_cache ? 1 : 0
+
+  security_group_id            = module.container_host.security_group_id
+  description                  = "Rate limiter counters"
+  ip_protocol                  = "tcp"
+  from_port                    = 6379
+  to_port                      = 6379
+  referenced_security_group_id = module.valkey[0].security_group_id
+}
+
 data "aws_iam_policy_document" "cache_connect" {
   count = var.enable_cache ? 1 : 0
 
@@ -427,6 +450,18 @@ resource "aws_ssm_parameter" "redis_user" {
   name  = "${local.parameter_path}/REDIS_USERNAME"
   type  = "String"
   value = module.valkey[0].iam_user_name
+}
+
+# The token is signed against the cache NAME, not its endpoint hostname. They
+# differ — the endpoint carries a generated suffix — and signing against the
+# wrong one produces a token the server rejects as invalid rather than as
+# unauthorised, which is a confusing place to start debugging.
+resource "aws_ssm_parameter" "redis_cache_name" {
+  count = var.enable_cache ? 1 : 0
+
+  name  = "${local.parameter_path}/REDIS_CACHE_NAME"
+  type  = "String"
+  value = module.valkey[0].cache_name
 }
 
 resource "aws_ssm_parameter" "redis_tls" {
