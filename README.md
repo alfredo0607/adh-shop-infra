@@ -163,17 +163,31 @@ bucket, so the object cannot be fetched directly. `trusted_key_groups` on the
 distribution means an unsigned request is rejected at the edge, before the
 origin is touched.
 
-The signing key pair is RSA 2048, which is what CloudFront requires. Terraform
-generates it so the platform still comes up in one apply, and publishes three
-values to Parameter Store for the API: `CDN_DOMAIN`, `CDN_KEY_PAIR_ID` and
-`CDN_PRIVATE_KEY`. Only the last is a secret, and it is the only one stored as
-a `SecureString`.
+### The signing key never passes through Terraform
 
-**The trade-off, named rather than hidden:** a generated key lands in Terraform
-state. That state is in a bucket encrypted with a customer managed key,
-versioned, and reachable only over TLS — which is why the bootstrap stack pays
-for that key. Supplying `signing_private_key_pem` keeps the material out of
-state entirely, at the cost of generating and storing it yourself.
+RSA 2048, which is what CloudFront requires. Generated once, outside Terraform:
+
+```bash
+openssl genrsa -out private.pem 2048
+openssl rsa -pubout -in private.pem -out public_key.pem
+aws s3 cp private.pem s3://<scripts bucket>/keys/cloudfront/private.pem
+rm private.pem
+```
+
+Only the public half is read by Terraform, from `public_key.pem` in the stack
+directory. A public key is not a secret, so it is committed — with a `.gitignore`
+exception written as a full path rather than a filename, because `!public_key.pem`
+on its own would let a private key slip through under that name.
+
+The private half travels S3 → Parameter Store → deleted. `add-keys.sh` pulls it
+into a directory created with mode 700, writes it as a `SecureString`, and a
+trap shreds and removes that directory on any exit — success, failure or
+interrupt. The window in which a private key exists on disk is the seconds
+between those two steps.
+
+Generating it in Terraform would be fewer steps, but the key would then live in
+state: a file read on every plan, by anyone who can run one, long after the
+moment it was needed.
 
 CloudFront trusts a *key group* rather than a key. The indirection is what makes
 rotation possible: add a second key, let clients migrate, remove the first —

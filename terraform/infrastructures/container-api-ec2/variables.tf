@@ -113,16 +113,16 @@ variable "cache_max_ecpu_per_second" {
 
 # ── Image CDN ─────────────────────────────────────────────────────────────────
 
-variable "signing_private_key_pem" {
-  type        = string
-  description = "Externally generated RSA 2048 private key. Null generates one, at the cost of it living in state"
-  default     = null
-  sensitive   = true
-}
-
 variable "signing_public_key_pem" {
   type        = string
-  description = "Its public half. Required when signing_private_key_pem is supplied"
+  description = <<-EOT
+    PEM public key CloudFront verifies signed URLs against.
+
+    Null reads public_key.pem from the stack directory, which is where the
+    reference implementation keeps it. A public key is not a secret, so it is
+    committed; its private half goes to the scripts bucket and from there to
+    Parameter Store.
+  EOT
   default     = null
 }
 

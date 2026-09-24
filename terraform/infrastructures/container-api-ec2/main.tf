@@ -205,44 +205,38 @@ resource "aws_iam_role_policy" "cache_connect" {
 # URL the API issues. Possessing the address is not enough: the URL has to have
 # been granted, and it expires.
 
+module "assets_kms" {
+  source      = "../../modules/kms"
+  alias_name  = "${var.project}-assets"
+  description = "Encrypts product images for ${var.project}"
+}
+
 module "assets_bucket" {
   source      = "../../modules/s3-private-assets"
   bucket_name = "${var.project}-assets-${local.account_id}"
+  kms_key_arn = module.assets_kms.key_arn
 }
 
-# RSA 2048 is what CloudFront requires for URL signing.
+# The signing key pair is generated outside Terraform and never passes through
+# it. Only the public half is read here; the private half is uploaded to the
+# scripts bucket under keys/cloudfront/, and add-keys.sh publishes it to
+# Parameter Store on the host and deletes the local copy.
 #
-# Generated here rather than by hand so the whole platform still comes up in one
-# apply. The trade-off is real and worth naming: the private key is written to
-# Terraform state. That state lives in a bucket encrypted with a customer
-# managed key, versioned, and reachable only over TLS — which is why the
-# bootstrap stack pays for that key. Supplying an externally generated key
-# through signing_private_key_pem avoids it entirely for anyone who would rather
-# keep the material out of state.
-resource "tls_private_key" "url_signing" {
-  count = var.signing_private_key_pem == null ? 1 : 0
-
-  algorithm = "RSA"
-  rsa_bits  = 2048
-}
-
-locals {
-  signing_private_key = coalesce(
-    var.signing_private_key_pem,
-    one(tls_private_key.url_signing[*].private_key_pem),
-  )
-  signing_public_key = coalesce(
-    var.signing_public_key_pem,
-    one(tls_private_key.url_signing[*].public_key_pem),
-  )
-}
+# Generating it in Terraform would be fewer steps, but the private key would
+# then live in state — a file that is read on every plan, by anyone who can run
+# one, long after the moment it was needed.
+#
+#   openssl genrsa -out private.pem 2048
+#   openssl rsa -pubout -in private.pem -out public_key.pem
+#   aws s3 cp private.pem s3://<scripts bucket>/keys/cloudfront/private.pem
+#   rm private.pem
 
 module "cdn" {
   source = "../../modules/cloudfront-cdn"
 
   name                           = "${var.project}-assets"
   s3_bucket_regional_domain_name = module.assets_bucket.bucket_regional_domain_name
-  signing_public_key_pem         = local.signing_public_key
+  signing_public_key_pem         = var.signing_public_key_pem != null ? var.signing_public_key_pem : file("${path.module}/public_key.pem")
 
   aliases             = var.cdn_aliases
   acm_certificate_arn = var.cdn_acm_certificate_arn
@@ -277,6 +271,36 @@ data "aws_iam_policy_document" "cdn_read" {
 resource "aws_s3_bucket_policy" "cdn_read" {
   bucket = module.assets_bucket.bucket_id
   policy = data.aws_iam_policy_document.cdn_read.json
+}
+
+# Defined here rather than in the kms module, to break the same cycle as the
+# bucket policy: the key policy needs the distribution ARN, which does not exist
+# when the key is created.
+resource "aws_kms_key_policy" "assets" {
+  key_id = module.assets_kms.key_id
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Sid       = "EnableRootAccess"
+        Effect    = "Allow"
+        Principal = { AWS = "arn:aws:iam::${local.account_id}:root" }
+        Action    = "kms:*"
+        Resource  = "*"
+      },
+      {
+        Sid       = "AllowCloudFrontViaS3"
+        Effect    = "Allow"
+        Principal = { Service = "cloudfront.amazonaws.com" }
+        Action    = ["kms:Decrypt", "kms:GenerateDataKey"]
+        Resource  = "*"
+        Condition = {
+          StringEquals = { "AWS:SourceArn" = module.cdn.distribution_arn }
+        }
+      },
+    ]
+  })
 }
 
 # ── Application configuration ─────────────────────────────────────────────────
@@ -318,13 +342,6 @@ resource "aws_ssm_parameter" "cdn_key_pair_id" {
   name  = "${local.parameter_path}/CDN_KEY_PAIR_ID"
   type  = "String"
   value = module.cdn.key_pair_id
-}
-
-resource "aws_ssm_parameter" "cdn_private_key" {
-  name        = "${local.parameter_path}/CDN_PRIVATE_KEY"
-  description = "Signs image URLs. Read by the instance role, never written to disk"
-  type        = "SecureString"
-  value       = local.signing_private_key
 }
 
 resource "aws_ssm_parameter" "redis_host" {

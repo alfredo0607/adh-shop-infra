@@ -214,6 +214,30 @@ data "aws_iam_policy_document" "permissions" {
     }
   }
 
+  # add-keys.sh publishes key material pulled from the scripts bucket. Write is
+  # scoped to this project's parameter path, so a compromised host cannot
+  # overwrite another service's configuration.
+  statement {
+    sid = "PublishOwnParameters"
+    actions = [
+      "ssm:PutParameter",
+      "ssm:AddTagsToResource",
+    ]
+    resources = ["arn:aws:ssm:${var.region}:${var.account_id}:parameter${var.parameter_path}/*"]
+  }
+
+  statement {
+    sid       = "EncryptOwnParameters"
+    actions   = ["kms:Encrypt", "kms:GenerateDataKey"]
+    resources = ["*"]
+
+    condition {
+      test     = "StringEquals"
+      variable = "kms:ViaService"
+      values   = ["ssm.${var.region}.amazonaws.com"]
+    }
+  }
+
   statement {
     sid = "WriteLogs"
     actions = [
