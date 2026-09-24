@@ -101,13 +101,34 @@ resource "aws_s3_bucket_versioning" "scripts" {
 }
 
 # Uploaded by Terraform so the scripts on the host always match the repository.
+#
+# Line endings are normalised here rather than trusted. .gitattributes governs
+# what git stores, not what a Windows checkout puts on disk, and uploading the
+# working copy verbatim shipped a carriage return into the shebang. The host
+# then reports a missing interpreter whose name contains an invisible
+# character, which points at nothing a reader can see in the file.
+#
+# Normalising during the upload makes the artifact correct regardless of the
+# contributor's git configuration, rather than depending on every machine
+# being set up the same way.
+locals {
+  scripts = {
+    for name in fileset("${path.module}/../../scripts/container-api-ec2", "*.sh") :
+    name => replace(
+      file("${path.module}/../../scripts/container-api-ec2/${name}"),
+      "\r\n",
+      "\n",
+    )
+  }
+}
+
 resource "aws_s3_object" "scripts" {
-  for_each = fileset("${path.module}/../../scripts/container-api-ec2", "*.sh")
+  for_each = local.scripts
 
   bucket       = aws_s3_bucket.scripts.id
-  key          = "scripts/${each.value}"
-  source       = "${path.module}/../../scripts/container-api-ec2/${each.value}"
-  etag         = filemd5("${path.module}/../../scripts/container-api-ec2/${each.value}")
+  key          = "scripts/${each.key}"
+  content      = each.value
+  etag         = md5(each.value)
   content_type = "text/x-shellscript"
 }
 
@@ -314,14 +335,29 @@ resource "aws_kms_key_policy" "assets" {
 
 module "deploy_role" {
   source = "../../modules/iam-github-oidc"
-  count  = var.github_repository == null ? 0 : 1
+  count  = var.github_repository_owner == null ? 0 : 1
 
   role_name = "${var.project}-github-deploy"
   region    = var.region
 
-  # Pinned to one branch. "repo:owner/name:*" would let a pull request from a
-  # fork deploy to production.
-  allowed_subjects = ["repo:${var.github_repository}:ref:refs/heads/${var.deploy_branch}"]
+  # The subject GitHub actually signs, which is not the one the documentation
+  # examples show.
+  #
+  # Tokens carry immutable identifiers rather than names:
+  #   repo:owner@<owner_id>/name@<repo_id>:environment:<env>
+  #
+  # That is a deliberate protection. Names can be released and re-registered, so
+  # a policy written against "repo:alfredo0607/adh-shop-api" would follow the
+  # name to whoever claims it next; the numeric ids never move. Determined by
+  # reading a denied AssumeRoleWithWebIdentity event in CloudTrail, because
+  # guessing the format twice had already cost two failed deployments.
+  #
+  # The environment rather than the ref, because a job declaring `environment:`
+  # gets a subject naming it instead of the branch. Which branch may deploy is
+  # enforced by GitHub, as a deployment branch policy on the environment itself.
+  allowed_subjects = [
+    "repo:${var.github_repository_owner}@${var.github_owner_id}/${var.github_repository_name}@${var.github_repository_id}:environment:${var.deploy_environment}",
+  ]
 
   ecr_repository_arn   = module.ecr.repository_arn
   instance_arn         = "arn:aws:ec2:${var.region}:${local.account_id}:instance/${module.container_host.instance_id}"

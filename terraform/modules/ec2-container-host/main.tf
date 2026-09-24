@@ -312,12 +312,24 @@ resource "aws_instance" "this" {
 
   # IMDSv2 required. With IMDSv1 still enabled, a single server-side request
   # forgery in the application is enough to read the instance role's temporary
-  # credentials; the session-token handshake IMDSv2 requires cannot be
-  # performed through a naive proxied request.
+  # credentials; the session-token handshake IMDSv2 requires cannot be performed
+  # through a naive proxied request.
+  #
+  # The hop limit is 2 rather than 1 because the workload runs in containers. A
+  # packet from a bridged container reaches the metadata service one hop further
+  # out than one from the host, so a limit of 1 silently denies every container
+  # its credentials — the SDK simply finds none and every AWS call fails with
+  # something that looks like a permissions problem and is not.
+  #
+  # That is a real cost, not a free change: 2 is also the number that lets a
+  # container reach IMDS at all, which is the path an SSRF would take. IMDSv2
+  # remains the control that matters there, since the token handshake cannot be
+  # performed through a naive proxied request. Dropping to 1 is correct for a
+  # host that runs no containers.
   metadata_options {
     http_tokens                 = "required"
     http_endpoint               = "enabled"
-    http_put_response_hop_limit = 1
+    http_put_response_hop_limit = 2
   }
 
   root_block_device {

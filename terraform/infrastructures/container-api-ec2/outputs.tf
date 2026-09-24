@@ -65,5 +65,5 @@ output "instance_id" {
 
 output "deploy_role_arn" {
   description = "Set as the AWS_DEPLOY_ROLE repository variable in GitHub"
-  value       = var.github_repository == null ? null : module.deploy_role[0].role_arn
+  value       = var.github_repository_owner == null ? null : module.deploy_role[0].role_arn
 }
