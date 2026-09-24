@@ -407,10 +407,23 @@ resource "aws_ssm_parameter" "region" {
 }
 
 resource "aws_ssm_parameter" "trust_proxy_hops" {
-  name        = "${local.parameter_path}/TRUST_PROXY_HOPS"
-  description = "nginx sits in front of the container, so exactly one hop is trusted"
+  name = "${local.parameter_path}/TRUST_PROXY_HOPS"
+
+  # Two proxies sit in front of the container, not one: the CDN terminates TLS
+  # and appends the caller's address, then nginx appends the CDN edge. Express
+  # discards exactly this many entries from the right of X-Forwarded-For, so
+  # trusting a single hop stops at the edge address — which rotates between
+  # requests and is shared by unrelated callers. The rate limiter then buckets
+  # by edge instead of by client: one caller rotating through edges gets a
+  # multiple of the quota, while strangers who happen to share an edge share a
+  # counter. Both failures are silent.
+  #
+  # Counting both hops stays forgery-resistant. A caller that sends its own
+  # X-Forwarded-For has that value pushed further left by the two appends, so
+  # it can never occupy the position this count selects.
+  description = "the CDN edge and nginx both sit in front of the container"
   type        = "String"
-  value       = "1"
+  value       = "2"
 }
 
 # The API needs three things to sign a URL: the host to sign against, the key
