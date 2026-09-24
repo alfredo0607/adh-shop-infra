@@ -12,7 +12,7 @@ terraform/
 │   ├── network/               VPC, public and private tiers, gateway endpoints
 │   ├── data-store/            DynamoDB
 │   ├── container-api-ec2/     ECR, scripts bucket, container host
-│   └── cdn-web-spa/           S3 + CloudFront for the SPA (pending)
+│   └── cdn-web-spa/           S3 + CloudFront for the SPA
 ├── modules/                   Reusable modules, one per resource group
 ├── user-data/                 Instance boot scripts, rendered by templatefile()
 └── scripts/                   Operational scripts, uploaded to S3
@@ -129,7 +129,28 @@ Runs without AWS credentials: `terraform fmt -check`, `validate` on every stack
 with `-backend=false`, `tflint`, a Trivy configuration scan, and ShellCheck over
 the operational scripts.
 
+## Storefront delivery
+
+The built SPA lives in a private bucket reached only through CloudFront with
+Origin Access Control, so the TLS, the security headers and the caching cannot
+be bypassed by addressing the bucket directly.
+
+Setting `api_origin_domain_name` makes CloudFront serve the API under `/api/*`
+from the same domain as the SPA. The browser then never issues a cross-origin
+request: no preflight, no `Access-Control-*` headers, one certificate, and the
+API inherits the same security headers as the front end.
+
+Two cache behaviours, because one size does not fit: `/assets/*` is cached for a
+year (the bundler puts a content hash in every filename), while `index.html`
+is not (or a release would take a day to appear). API responses are never
+cached at the edge — one customer's transaction served to another is not a
+theoretical risk.
+
+`403` and `404` are rewritten to `/index.html` with a `200` so client-side
+routing works. Without it, refreshing any page other than the root is an error.
+
+Deploy with the command printed by `terraform output deploy_command`.
+
 ## Pending
 
-- `cdn-web-spa`: S3 + CloudFront for the storefront.
 - The private tier is provisioned but empty, awaiting the rate-limit cache.
