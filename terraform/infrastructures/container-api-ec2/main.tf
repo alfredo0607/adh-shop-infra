@@ -101,13 +101,34 @@ resource "aws_s3_bucket_versioning" "scripts" {
 }
 
 # Uploaded by Terraform so the scripts on the host always match the repository.
+#
+# Line endings are normalised here rather than trusted. .gitattributes governs
+# what git stores, not what a Windows checkout puts on disk, and uploading the
+# working copy verbatim shipped a carriage return into the shebang. The host
+# then reports a missing interpreter whose name contains an invisible
+# character, which points at nothing a reader can see in the file.
+#
+# Normalising during the upload makes the artifact correct regardless of the
+# contributor's git configuration, rather than depending on every machine
+# being set up the same way.
+locals {
+  scripts = {
+    for name in fileset("${path.module}/../../scripts/container-api-ec2", "*.sh") :
+    name => replace(
+      file("${path.module}/../../scripts/container-api-ec2/${name}"),
+      "\r\n",
+      "\n",
+    )
+  }
+}
+
 resource "aws_s3_object" "scripts" {
-  for_each = fileset("${path.module}/../../scripts/container-api-ec2", "*.sh")
+  for_each = local.scripts
 
   bucket       = aws_s3_bucket.scripts.id
-  key          = "scripts/${each.value}"
-  source       = "${path.module}/../../scripts/container-api-ec2/${each.value}"
-  etag         = filemd5("${path.module}/../../scripts/container-api-ec2/${each.value}")
+  key          = "scripts/${each.key}"
+  content      = each.value
+  etag         = md5(each.value)
   content_type = "text/x-shellscript"
 }
 

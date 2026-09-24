@@ -36,7 +36,7 @@ fail() { printf '[deploy] ERROR: %s\n' "$*" >&2; exit 1; }
 # Captures the digits explicitly. Splitting the line on ":" instead returns
 # "3000;" — nginx directives end in a semicolon — and every later arithmetic
 # test then fails with a syntax error rather than a wrong number.
-BLUE_PORT=$(sed -n 's/.*server[[:space:]]\{1,\}127\.0\.0\.1:\([0-9]\{1,\}\).*//p' "$UPSTREAM_CONF" | head -1)
+BLUE_PORT=$(sed -n 's/.*server[[:space:]]\{1,\}127\.0\.0\.1:\([0-9]\{1,\}\).*/\1/p' "$UPSTREAM_CONF" | head -1)
 
 [[ "$BLUE_PORT" =~ ^[0-9]+$ ]] || fail "could not read a port from $UPSTREAM_CONF (got '${BLUE_PORT:-empty}')"
 
