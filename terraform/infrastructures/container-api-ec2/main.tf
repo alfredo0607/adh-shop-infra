@@ -11,8 +11,10 @@
 #
 #   terraform apply
 #
-# The storefront CDN stays in its own stack. It shares nothing with this one —
-# no VPC, no instance, no table — and only matters once the front end exists.
+# The image CDN is part of this stack rather than its own, because it depends
+# on the API: CloudFront verifies signatures the API produces, so the signing key
+# pair, the key group and the parameter the API reads it from have to be created
+# together or not at all.
 
 data "aws_caller_identity" "current" {}
 
@@ -125,7 +127,7 @@ module "container_host" {
   instance_type    = var.instance_type
   root_volume_size = var.root_volume_size
 
-  public_key        = var.ssh_public_key
+  key_pair_name     = var.key_pair_name
   allowed_ssh_cidrs = var.allowed_ssh_cidrs
 
   ecr_repository_arn = module.ecr.repository_arn
@@ -197,6 +199,86 @@ resource "aws_iam_role_policy" "cache_connect" {
   policy = data.aws_iam_policy_document.cache_connect[0].json
 }
 
+# ── Private image CDN ─────────────────────────────────────────────────────────
+#
+# Product images are served through CloudFront and reachable only with a signed
+# URL the API issues. Possessing the address is not enough: the URL has to have
+# been granted, and it expires.
+
+module "assets_bucket" {
+  source      = "../../modules/s3-private-assets"
+  bucket_name = "${var.project}-assets-${local.account_id}"
+}
+
+# RSA 2048 is what CloudFront requires for URL signing.
+#
+# Generated here rather than by hand so the whole platform still comes up in one
+# apply. The trade-off is real and worth naming: the private key is written to
+# Terraform state. That state lives in a bucket encrypted with a customer
+# managed key, versioned, and reachable only over TLS — which is why the
+# bootstrap stack pays for that key. Supplying an externally generated key
+# through signing_private_key_pem avoids it entirely for anyone who would rather
+# keep the material out of state.
+resource "tls_private_key" "url_signing" {
+  count = var.signing_private_key_pem == null ? 1 : 0
+
+  algorithm = "RSA"
+  rsa_bits  = 2048
+}
+
+locals {
+  signing_private_key = coalesce(
+    var.signing_private_key_pem,
+    one(tls_private_key.url_signing[*].private_key_pem),
+  )
+  signing_public_key = coalesce(
+    var.signing_public_key_pem,
+    one(tls_private_key.url_signing[*].public_key_pem),
+  )
+}
+
+module "cdn" {
+  source = "../../modules/cloudfront-cdn"
+
+  name                           = "${var.project}-assets"
+  s3_bucket_regional_domain_name = module.assets_bucket.bucket_regional_domain_name
+  signing_public_key_pem         = local.signing_public_key
+
+  aliases             = var.cdn_aliases
+  acm_certificate_arn = var.cdn_acm_certificate_arn
+  price_class         = var.cdn_price_class
+}
+
+# Defined here rather than in the bucket module: the policy needs the
+# distribution ARN and the distribution needs the bucket domain, so expressing
+# both as module inputs would be a cycle Terraform refuses to plan.
+#
+# Scoped by SourceArn. Without the condition, any CloudFront distribution in any
+# AWS account could read this bucket.
+data "aws_iam_policy_document" "cdn_read" {
+  statement {
+    sid       = "AllowCloudFrontRead"
+    actions   = ["s3:GetObject"]
+    resources = ["${module.assets_bucket.bucket_arn}/*"]
+
+    principals {
+      type        = "Service"
+      identifiers = ["cloudfront.amazonaws.com"]
+    }
+
+    condition {
+      test     = "StringEquals"
+      variable = "AWS:SourceArn"
+      values   = [module.cdn.distribution_arn]
+    }
+  }
+}
+
+resource "aws_s3_bucket_policy" "cdn_read" {
+  bucket = module.assets_bucket.bucket_id
+  policy = data.aws_iam_policy_document.cdn_read.json
+}
+
 # ── Application configuration ─────────────────────────────────────────────────
 #
 # Written to Parameter Store, which deploy.sh materialises into the container's
@@ -221,6 +303,28 @@ resource "aws_ssm_parameter" "trust_proxy_hops" {
   description = "nginx sits in front of the container, so exactly one hop is trusted"
   type        = "String"
   value       = "1"
+}
+
+# The API needs three things to sign a URL: the host to sign against, the key
+# pair id CloudFront matches the signature to, and the private key itself. Only
+# the last is a secret.
+resource "aws_ssm_parameter" "cdn_domain" {
+  name  = "${local.parameter_path}/CDN_DOMAIN"
+  type  = "String"
+  value = module.cdn.domain_name
+}
+
+resource "aws_ssm_parameter" "cdn_key_pair_id" {
+  name  = "${local.parameter_path}/CDN_KEY_PAIR_ID"
+  type  = "String"
+  value = module.cdn.key_pair_id
+}
+
+resource "aws_ssm_parameter" "cdn_private_key" {
+  name        = "${local.parameter_path}/CDN_PRIVATE_KEY"
+  description = "Signs image URLs. Read by the instance role, never written to disk"
+  type        = "SecureString"
+  value       = local.signing_private_key
 }
 
 resource "aws_ssm_parameter" "redis_host" {

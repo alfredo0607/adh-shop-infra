@@ -51,9 +51,17 @@ variable "root_volume_size" {
   default = 20
 }
 
-variable "ssh_public_key" {
+variable "key_pair_name" {
   type        = string
-  description = "SSH public key. Null creates no key pair and leaves Session Manager as the only way in"
+  description = <<-EOT
+    Name of an EC2 key pair that already exists in this account.
+
+    Create it in the console or with:
+      aws ec2 create-key-pair --key-name adh-shop --query KeyMaterial         --output text > adh-shop.pem && chmod 400 adh-shop.pem
+
+    AWS generates the pair and returns the private half once, so it never
+    reaches Terraform state. Null attaches none.
+  EOT
   default     = null
 }
 
@@ -101,4 +109,35 @@ variable "cache_max_ecpu_per_second" {
   type        = number
   description = "Ceiling, so a traffic spike throttles rather than billing without limit"
   default     = 5000
+}
+
+# ── Image CDN ─────────────────────────────────────────────────────────────────
+
+variable "signing_private_key_pem" {
+  type        = string
+  description = "Externally generated RSA 2048 private key. Null generates one, at the cost of it living in state"
+  default     = null
+  sensitive   = true
+}
+
+variable "signing_public_key_pem" {
+  type        = string
+  description = "Its public half. Required when signing_private_key_pem is supplied"
+  default     = null
+}
+
+variable "cdn_aliases" {
+  type    = list(string)
+  default = []
+}
+
+variable "cdn_acm_certificate_arn" {
+  type        = string
+  description = "MUST be issued in us-east-1: CloudFront reads certificates only from there"
+  default     = null
+}
+
+variable "cdn_price_class" {
+  type    = string
+  default = "PriceClass_100"
 }

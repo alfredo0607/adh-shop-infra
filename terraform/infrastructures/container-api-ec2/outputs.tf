@@ -42,3 +42,18 @@ output "next_steps" {
     4. Deploy:                       ./deploy.sh ${module.ecr.repository_url}:<sha> <app>
   EOT
 }
+
+output "cdn_domain" {
+  description = "Host the API signs image URLs against"
+  value       = module.cdn.domain_name
+}
+
+output "cdn_key_pair_id" {
+  description = "Sent as Key-Pair-Id in every signed URL"
+  value       = module.cdn.key_pair_id
+}
+
+output "assets_bucket" {
+  description = "Upload product images here; they are only reachable through a signed URL"
+  value       = module.assets_bucket.bucket_id
+}

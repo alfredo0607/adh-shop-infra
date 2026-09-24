@@ -249,15 +249,6 @@ resource "aws_iam_instance_profile" "this" {
 
 # ── Instance ──────────────────────────────────────────────────────────────────
 
-resource "aws_key_pair" "this" {
-  count = var.public_key == null ? 0 : 1
-
-  key_name   = "${var.name}-key"
-  public_key = var.public_key
-
-  tags = var.tags
-}
-
 resource "aws_instance" "this" {
   ami           = data.aws_ami.amazon_linux.id
   instance_type = var.instance_type
@@ -265,7 +256,7 @@ resource "aws_instance" "this" {
 
   vpc_security_group_ids = [aws_security_group.this.id]
   iam_instance_profile   = aws_iam_instance_profile.this.name
-  key_name               = var.public_key == null ? null : aws_key_pair.this[0].key_name
+  key_name               = var.key_pair_name
 
   user_data_base64 = var.user_data_base64
   # Changing user data rebuilds the host rather than leaving it in a state that

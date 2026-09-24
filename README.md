@@ -9,9 +9,8 @@ terraform/
 ├── bootstrap/
 │   └── remote-state/          S3 bucket holding every other stack's state
 ├── infrastructures/
-│   ├── container-api-ec2/     The API platform: network, table, registry,
-│   │                          host, and optionally the cache — one apply
-│   └── cdn-web-spa/           S3 + CloudFront for the SPA
+│   └── container-api-ec2/     The whole platform in one apply: network, table,
+│                              registry, host, image CDN, optional cache
 ├── modules/                   Reusable modules, one per resource group
 ├── user-data/                 Instance boot scripts, rendered by templatefile()
 └── scripts/                   Operational scripts, uploaded to S3
@@ -25,8 +24,10 @@ not hold here: one person owns all of it, there is one environment, and it is
 short-lived. The separation bought ceremony rather than safety, at the price of
 four applies in a fixed order that had to be remembered.
 
-The CDN stays separate because it genuinely shares nothing: no VPC, no instance,
-no table, and it only matters once the front end exists.
+The image CDN belongs here too, because it depends on the API rather than
+standing beside it: CloudFront verifies signatures the API produces, so the
+signing key pair, the key group and the parameter the API reads it from have to
+be created together or not at all.
 
 ## Network tiers
 
@@ -62,13 +63,6 @@ terraform -chdir=terraform/infrastructures/container-api-ec2 apply
 That is the deployment. Every input has a working default, so
 `terraform.tfvars` is only needed to change one — narrowing SSH to a single
 address, or turning the cache on.
-
-The storefront CDN is one more command, whenever the front end exists:
-
-```bash
-./scripts/tf-init.sh terraform/infrastructures/cdn-web-spa
-terraform -chdir=terraform/infrastructures/cdn-web-spa apply
-```
 
 ### Why `tf-init.sh` rather than a backend file
 
@@ -158,27 +152,38 @@ Runs without AWS credentials: `terraform fmt -check`, `validate` on every stack
 with `-backend=false`, `tflint`, a Trivy configuration scan, and ShellCheck over
 the operational scripts.
 
+## Image delivery
+
+Product images live in a private bucket and are served through CloudFront
+**only with a signed URL the API issues**. Possessing the address is not enough:
+the URL has to have been granted, and it expires.
+
+Two controls, and both must pass. Origin Access Control is the only path to the
+bucket, so the object cannot be fetched directly. `trusted_key_groups` on the
+distribution means an unsigned request is rejected at the edge, before the
+origin is touched.
+
+The signing key pair is RSA 2048, which is what CloudFront requires. Terraform
+generates it so the platform still comes up in one apply, and publishes three
+values to Parameter Store for the API: `CDN_DOMAIN`, `CDN_KEY_PAIR_ID` and
+`CDN_PRIVATE_KEY`. Only the last is a secret, and it is the only one stored as
+a `SecureString`.
+
+**The trade-off, named rather than hidden:** a generated key lands in Terraform
+state. That state is in a bucket encrypted with a customer managed key,
+versioned, and reachable only over TLS — which is why the bootstrap stack pays
+for that key. Supplying `signing_private_key_pem` keeps the material out of
+state entirely, at the cost of generating and storing it yourself.
+
+CloudFront trusts a *key group* rather than a key. The indirection is what makes
+rotation possible: add a second key, let clients migrate, remove the first —
+with no window in which no key is valid.
+
 ## Storefront delivery
 
-The built SPA lives in a private bucket reached only through CloudFront with
-Origin Access Control, so the TLS, the security headers and the caching cannot
-be bypassed by addressing the bucket directly.
-
-Setting `api_origin_domain_name` makes CloudFront serve the API under `/api/*`
-from the same domain as the SPA. The browser then never issues a cross-origin
-request: no preflight, no `Access-Control-*` headers, one certificate, and the
-API inherits the same security headers as the front end.
-
-Two cache behaviours, because one size does not fit: `/assets/*` is cached for a
-year (the bundler puts a content hash in every filename), while `index.html`
-is not (or a release would take a day to appear). API responses are never
-cached at the edge — one customer's transaction served to another is not a
-theoretical risk.
-
-`403` and `404` are rewritten to `/index.html` with a `200` so client-side
-routing works. Without it, refreshing any page other than the root is an error.
-
-Deploy with the command printed by `terraform output deploy_command`.
+Not built yet. The SPA needs somewhere to live and it is not this CDN, whose
+distribution requires a signature on every request — a browser loading
+`index.html` has no signature to present.
 
 ## Rate limiter cache
 

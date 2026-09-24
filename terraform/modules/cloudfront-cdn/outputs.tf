@@ -1,6 +1,5 @@
 output "distribution_id" {
-  description = "Needed to invalidate the cache after a front-end deployment"
-  value       = aws_cloudfront_distribution.this.id
+  value = aws_cloudfront_distribution.this.id
 }
 
 output "distribution_arn" {
@@ -9,5 +8,11 @@ output "distribution_arn" {
 }
 
 output "domain_name" {
-  value = aws_cloudfront_distribution.this.domain_name
+  description = "Host the API builds signed URLs against"
+  value       = aws_cloudfront_distribution.this.domain_name
+}
+
+output "key_pair_id" {
+  description = "Sent as Key-Pair-Id in every signed URL, so the API needs it"
+  value       = aws_cloudfront_public_key.this.id
 }

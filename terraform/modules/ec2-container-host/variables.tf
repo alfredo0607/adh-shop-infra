@@ -31,11 +31,20 @@ variable "root_volume_size" {
   default = 20
 }
 
-variable "public_key" {
+variable "key_pair_name" {
   type        = string
-  description = "SSH public key. Null disables SSH entirely in favour of Session Manager"
+  description = <<-EOT
+    Name of an existing EC2 key pair to attach.
+
+    Created in the AWS console or with `aws ec2 create-key-pair`, which
+    generates the pair and hands back the private half once. Referencing it by
+    name keeps the private key out of Terraform: generating it here would write
+    it into state, where it outlives the moment it was needed and is far harder
+    to rotate than a key pair that can simply be replaced.
+
+    Null attaches none, leaving Session Manager as the way in.
+  EOT
   default     = null
-  sensitive   = false
 }
 
 variable "allowed_ssh_cidrs" {
