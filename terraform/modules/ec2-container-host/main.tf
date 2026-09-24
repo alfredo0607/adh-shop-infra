@@ -56,9 +56,22 @@ resource "aws_vpc_security_group_ingress_rule" "https" {
   cidr_ipv4         = "0.0.0.0/0"
 }
 
-# SSH is restricted by CIDR rather than open to the world. The default is
-# deliberately not 0.0.0.0/0: an open SSH port collects credential-stuffing
-# traffic from the moment it exists.
+# SSH, opened to whatever the caller asks for — including the whole internet.
+#
+# The scanner is right to flag that, and the rule is a good one: AWS-0107
+# targets remote administration ports specifically, which is why 80 and 443 pass
+# untouched while 22 does not. An open SSH port collects credential-stuffing
+# traffic from the moment the address is reachable.
+#
+# It is accepted here because the operator asked for it, and because the module
+# is not the right place to overrule that. The narrower options remain a single
+# line away: allowed_ssh_cidrs = ["x.x.x.x/32"] restricts it to one address, and
+# an empty list removes the rule entirely while leaving Session Manager working,
+# since that needs no inbound rule at all.
+#
+# Recorded here rather than suppressed in a config file, so the next reader sees
+# the reasoning next to the decision.
+#trivy:ignore:AWS-0107
 resource "aws_vpc_security_group_ingress_rule" "ssh" {
   count = length(var.allowed_ssh_cidrs)
 
