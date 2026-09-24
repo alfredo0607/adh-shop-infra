@@ -47,8 +47,14 @@ jobs:
           done
           exit $failed
 
-      - name: Lint
-        uses: terraform-linters/setup-tflint@v4
+      # terraform validate resolves remote state outputs at apply time, not at
+      # plan time, so a stack reading an output its owner never declared passes
+      # validation and fails during the apply. This moves that failure here.
+      - name: Cross-stack outputs resolve
+        run: ./scripts/check-remote-state-outputs.sh
+
+      - name: Install tflint
+        uses: terraform-linters/setup-tflint@v6
         with:
           tflint_version: latest
 
@@ -58,13 +64,12 @@ jobs:
       # Fails on real misconfigurations: unencrypted volumes, open security
       # groups, public buckets.
       - name: Security scan
-        uses: aquasecurity/trivy-action@0.28.0
+        uses: aquasecurity/trivy-action@v0.36.0
         with:
           scan-type: config
           scan-ref: terraform/
           severity: HIGH,CRITICAL
           exit-code: '1'
-          trivy-config: trivy.yaml
 
   shell:
     name: Shell scripts
@@ -81,3 +86,10 @@ jobs:
           sudo apt-get update && sudo apt-get install -y shellcheck
           shellcheck --severity=warning \
             terraform/scripts/container-api-ec2/*.sh
+
+      # ShellCheck reads syntax, not behaviour. Splitting an nginx directive on
+      # ":" is valid shell that returns "3000;" instead of "3000", and only a
+      # deployment reveals it — which is how both scripting bugs so far were
+      # found, one of them against the live host.
+      - name: Parsing behaviour
+        run: ./scripts/test-deploy-scripts.sh

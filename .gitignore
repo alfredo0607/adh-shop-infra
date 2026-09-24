@@ -24,6 +24,12 @@ terraform.tfvars
 *.key
 *.p12
 *.pfx
+
+# One exception, by exact path rather than by name. A public key is not a
+# secret and CloudFront needs it at plan time. Allowing "!public_key.pem"
+# everywhere would let a private key slip through under that name; a full path
+# cannot be reached by accident.
+!terraform/infrastructures/container-api-ec2/public_key.pem
 .env
 .env.*
 !.env.example
@@ -32,3 +38,6 @@ terraform.tfvars
 .DS_Store
 Thumbs.db
 desktop.ini
+
+# Applied values, including the repository allowed to deploy
+terraform.tfvars

@@ -1,7 +1,0 @@
-# The bootstrap bucket is the Terraform state store, not a data bucket.
-# Replication and access logging on it would cost more than they protect.
-misconfiguration:
-  helm: {}
-severity:
-  - HIGH
-  - CRITICAL
