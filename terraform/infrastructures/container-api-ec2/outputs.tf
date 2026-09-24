@@ -25,3 +25,12 @@ output "next_steps" {
     4. Deploy:                 ./deploy.sh ${module.ecr.repository_url}:<sha> <app>
   EOT
 }
+
+output "role_name" {
+  description = "Consumed by the cache stack to attach elasticache:Connect"
+  value       = module.container_host.role_name
+}
+
+output "role_arn" {
+  value = module.container_host.role_arn
+}

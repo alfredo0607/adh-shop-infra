@@ -47,6 +47,12 @@ jobs:
           done
           exit $failed
 
+      # terraform validate resolves remote state outputs at apply time, not at
+      # plan time, so a stack reading an output its owner never declared passes
+      # validation and fails during the apply. This moves that failure here.
+      - name: Cross-stack outputs resolve
+        run: ./scripts/check-remote-state-outputs.sh
+
       - name: Install tflint
         uses: terraform-linters/setup-tflint@v6
         with:
