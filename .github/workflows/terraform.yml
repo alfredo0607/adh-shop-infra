@@ -47,8 +47,8 @@ jobs:
           done
           exit $failed
 
-      - name: Lint
-        uses: terraform-linters/setup-tflint@v4
+      - name: Install tflint
+        uses: terraform-linters/setup-tflint@v6
         with:
           tflint_version: latest
 
@@ -58,13 +58,12 @@ jobs:
       # Fails on real misconfigurations: unencrypted volumes, open security
       # groups, public buckets.
       - name: Security scan
-        uses: aquasecurity/trivy-action@0.28.0
+        uses: aquasecurity/trivy-action@v0.36.0
         with:
           scan-type: config
           scan-ref: terraform/
           severity: HIGH,CRITICAL
           exit-code: '1'
-          trivy-config: trivy.yaml
 
   shell:
     name: Shell scripts
