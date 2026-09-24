@@ -12,7 +12,8 @@ terraform/
 │   ├── network/               VPC, public and private tiers, gateway endpoints
 │   ├── data-store/            DynamoDB
 │   ├── container-api-ec2/     ECR, scripts bucket, container host
-│   └── cdn-web-spa/           S3 + CloudFront for the SPA
+│   ├── cdn-web-spa/           S3 + CloudFront for the SPA
+│   └── cache/                 Valkey, backing the rate limiter
 ├── modules/                   Reusable modules, one per resource group
 ├── user-data/                 Instance boot scripts, rendered by templatefile()
 └── scripts/                   Operational scripts, uploaded to S3
@@ -27,7 +28,7 @@ must not be able to touch routing.
 | Tier | Contents | Why |
 | --- | --- | --- |
 | Public | Container host (nginx + containers), elastic IP | Must answer on 80/443, and certbot's HTTP-01 challenge needs an inbound connection on port 80 |
-| Private | Reserved for the cache | No route to an internet gateway at all — stronger than a security group rule, because even a misconfigured group cannot expose it |
+| Private | Valkey cache | No route to an internet gateway at all — stronger than a security group rule, because even a misconfigured group cannot expose it |
 
 **There is no NAT gateway.** A NAT costs roughly 32 USD/month and is only needed
 when something in the private tier must reach the internet. Nothing here does.
@@ -151,6 +152,30 @@ routing works. Without it, refreshing any page other than the root is an error.
 
 Deploy with the command printed by `terraform output deploy_command`.
 
-## Pending
+## Rate limiter cache
 
-- The private tier is provisioned but empty, awaiting the rate-limit cache.
+Valkey Serverless in the private tier, authenticated with IAM. There is no
+password anywhere — not in state, not in Parameter Store, not in an environment
+variable. The host exchanges its instance role for a short-lived token on each
+connection, and IAM auth requires TLS.
+
+The cache identity is scoped to one key prefix and to read, write and scripting
+commands. If the application is compromised, the blast radius on the cache is
+that prefix.
+
+`cache_usage_limits` caps storage and compute. Serverless bills by both and
+neither is bounded by default, so a key leak or a deliberate attempt to inflate
+the key space throttles instead of producing an unbounded bill.
+
+Permission to connect is attached from the cache stack to the role the container
+stack created, rather than granted there against a name that does not exist yet.
+Both ARNs come from the resources themselves, so renaming the cache cannot leave
+a stale grant behind.
+
+Apply order: `network` → `data-store` → `container-api-ec2` → `cache`.
+
+**Cost.** Serverless has a minimum billed storage footprint, roughly 6 to 7 USD
+a month in us-east-1 even with no traffic. Valkey is materially cheaper than
+Redis OSS here, but it is not free; the historic ElastiCache free tier covered
+`t*.micro` nodes rather than serverless. Confirm against your own billing
+console.
