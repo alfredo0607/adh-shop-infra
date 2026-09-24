@@ -40,13 +40,15 @@ variable "public_key" {
 
 variable "allowed_ssh_cidrs" {
   type        = list(string)
-  description = "Source ranges permitted to reach port 22. Empty closes SSH"
-  default     = []
+  description = <<-EOT
+    Source ranges permitted to reach port 22. Empty closes the port entirely.
 
-  validation {
-    condition     = !contains(var.allowed_ssh_cidrs, "0.0.0.0/0")
-    error_message = "Refusing to open SSH to the whole internet. Use a specific CIDR, or leave the list empty and connect through Session Manager."
-  }
+    0.0.0.0/0 is accepted. It attracts credential-stuffing traffic from the
+    moment the address is reachable, so it is worth narrowing when practical —
+    but that is the operator's call, not this module's. Refusing it outright
+    only pushed the decision somewhere less visible.
+  EOT
+  default     = []
 }
 
 variable "ecr_repository_arn" {

@@ -1,6 +1,0 @@
-# Copy to terraform.tfvars.
-
-# Ceilings, not targets. Serverless bills by stored data and compute units and
-# neither is bounded by default.
-max_storage_gb      = 1
-max_ecpu_per_second = 5000

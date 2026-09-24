@@ -8,20 +8,25 @@ Terraform for the ADH Shop storefront. Single environment.
 terraform/
 ├── bootstrap/
 │   └── remote-state/          S3 bucket holding every other stack's state
-├── infrastructures/           Deployable stacks
-│   ├── network/               VPC, public and private tiers, gateway endpoints
-│   ├── data-store/            DynamoDB
-│   ├── container-api-ec2/     ECR, scripts bucket, container host
-│   ├── cdn-web-spa/           S3 + CloudFront for the SPA
-│   └── cache/                 Valkey, backing the rate limiter
+├── infrastructures/
+│   ├── container-api-ec2/     The API platform: network, table, registry,
+│   │                          host, and optionally the cache — one apply
+│   └── cdn-web-spa/           S3 + CloudFront for the SPA
 ├── modules/                   Reusable modules, one per resource group
 ├── user-data/                 Instance boot scripts, rendered by templatefile()
 └── scripts/                   Operational scripts, uploaded to S3
 ```
 
-Stacks are separated by rate of change and blast radius. The network changes
-rarely; the application changes constantly. A mistake while deploying the API
-must not be able to touch routing.
+The API platform is one stack rather than four. Separating network, data,
+registry and host was justified on blast radius — a mistake while deploying the
+application should not be able to touch routing — and that argument holds when
+separate teams own separate layers and change them at different rates. It does
+not hold here: one person owns all of it, there is one environment, and it is
+short-lived. The separation bought ceremony rather than safety, at the price of
+four applies in a fixed order that had to be remembered.
+
+The CDN stays separate because it genuinely shares nothing: no VPC, no instance,
+no table, and it only matters once the front end exists.
 
 ## Network tiers
 
@@ -37,43 +42,44 @@ keep that traffic off the public internet entirely.
 
 ## First run
 
-Nothing here asks for an account id or a bucket name. Both are derived from
-whoever is authenticated, so the state a stack writes to always belongs to the
-account it is deploying into.
+Nothing asks for an account id or a bucket name. Both are derived from whoever
+is authenticated, so the state a stack writes to always belongs to the account
+it is deploying into.
 
 ```bash
-export AWS_PROFILE=<a profile with permission to create these resources>
+export AWS_PROFILE=<a profile that can create these resources>
 export AWS_REGION=us-east-1
 
-# 1. Create the state bucket. Local state, applied once.
+# 1. The state bucket. Local state, applied once.
 terraform -chdir=terraform/bootstrap/remote-state init
 terraform -chdir=terraform/bootstrap/remote-state apply
 
-# 2. Apply the stacks in dependency order.
-for stack in network data-store container-api-ec2 cache; do
-  ./scripts/tf-init.sh "terraform/infrastructures/$stack"
-  terraform -chdir="terraform/infrastructures/$stack" apply
-done
+# 2. The whole API platform.
+./scripts/tf-init.sh terraform/infrastructures/container-api-ec2
+terraform -chdir=terraform/infrastructures/container-api-ec2 apply
+```
 
-# 3. The storefront CDN depends on nothing; run it whenever.
+That is the deployment. Every input has a working default, so
+`terraform.tfvars` is only needed to change one — narrowing SSH to a single
+address, or turning the cache on.
+
+The storefront CDN is one more command, whenever the front end exists:
+
+```bash
 ./scripts/tf-init.sh terraform/infrastructures/cdn-web-spa
 terraform -chdir=terraform/infrastructures/cdn-web-spa apply
 ```
-
-Only `container-api-ec2` takes optional input, and only to decide whether SSH is
-open at all — copy its `terraform.tfvars.example` if you want it.
 
 ### Why `tf-init.sh` rather than a backend file
 
 A `backend` block cannot use variables. Terraform resolves it before the
 variable system exists, so `bucket = var.state_bucket` is invalid by design. The
 usual workaround is a `backend.hcl`, which means the account id is either
-committed to a public repository or retyped for every stack.
+committed to a public repository or retyped by hand.
 
 The script derives the bucket from `sts get-caller-identity` and passes it with
-`-backend-config`, which removes both problems. Everywhere Terraform *does*
-allow interpolation — the cross-stack reads in `container-api-ec2` and `cache` —
-the name is computed in a `local` and never asked for.
+`-backend-config`, which removes both problems and also rules out initialising
+against the wrong account's state.
 
 State locking is native to S3 (`use_lockfile = true`, Terraform 1.10+). The
 separate DynamoDB lock table older guides require is no longer needed.
@@ -134,8 +140,11 @@ credentials.
 - **Application ports are not in the security group.** Exposing one would let
   anyone reach the app directly over plain HTTP, bypassing nginx, the
   certificate and the HTTPS redirect.
-- **SSH defaults to closed**, and the module *rejects* `0.0.0.0/0`. Session
-  Manager is available through the instance role and needs no open port.
+- **SSH is open to `0.0.0.0/0` by default**, which is a deliberate choice rather
+  than an oversight: it collects credential-stuffing traffic from the moment the
+  address is reachable. `allowed_ssh_cidrs` narrows it to a single address, and
+  an empty list closes the port entirely — Session Manager still works, since it
+  needs no inbound rule.
 - **Encryption at rest** on the root volume, the state bucket, the scripts
   bucket, DynamoDB and ECR.
 - **VPC flow logs** record rejected traffic, so "was this host reached from
