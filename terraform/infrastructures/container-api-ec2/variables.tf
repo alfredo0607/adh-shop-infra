@@ -141,3 +141,23 @@ variable "cdn_price_class" {
   type    = string
   default = "PriceClass_100"
 }
+
+# ── Deployment ────────────────────────────────────────────────────────────────
+
+variable "github_repository" {
+  type        = string
+  description = "owner/name of the repository allowed to deploy. Null creates no deploy role"
+  default     = null
+}
+
+variable "deploy_branch" {
+  type        = string
+  description = "The only branch whose workflow runs may deploy"
+  default     = "main"
+}
+
+variable "create_oidc_provider" {
+  type        = bool
+  description = "False when the account already registers GitHub's provider; only one may exist"
+  default     = true
+}

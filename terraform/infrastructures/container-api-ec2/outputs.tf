@@ -57,3 +57,13 @@ output "assets_bucket" {
   description = "Upload product images here; they are only reachable through a signed URL"
   value       = module.assets_bucket.bucket_id
 }
+
+output "instance_id" {
+  description = "Deployments target this instance through Session Manager"
+  value       = module.container_host.instance_id
+}
+
+output "deploy_role_arn" {
+  description = "Set as the AWS_DEPLOY_ROLE repository variable in GitHub"
+  value       = var.github_repository == null ? null : module.deploy_role[0].role_arn
+}

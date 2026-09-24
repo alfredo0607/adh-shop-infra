@@ -303,6 +303,31 @@ resource "aws_kms_key_policy" "assets" {
   })
 }
 
+# ── Deployment identity ───────────────────────────────────────────────────────
+#
+# GitHub Actions assumes a role here instead of holding an access key.
+#
+# A stored key pair is long-lived, valid from anywhere, and silent once leaked.
+# An OIDC token describes which repository and which ref is running, expires in
+# an hour, and is verified by AWS against GitHub's signature — so there is no
+# secret in the repository to leak in the first place.
+
+module "deploy_role" {
+  source = "../../modules/iam-github-oidc"
+  count  = var.github_repository == null ? 0 : 1
+
+  role_name = "${var.project}-github-deploy"
+  region    = var.region
+
+  # Pinned to one branch. "repo:owner/name:*" would let a pull request from a
+  # fork deploy to production.
+  allowed_subjects = ["repo:${var.github_repository}:ref:refs/heads/${var.deploy_branch}"]
+
+  ecr_repository_arn   = module.ecr.repository_arn
+  instance_arn         = "arn:aws:ec2:${var.region}:${local.account_id}:instance/${module.container_host.instance_id}"
+  create_oidc_provider = var.create_oidc_provider
+}
+
 # ── Application configuration ─────────────────────────────────────────────────
 #
 # Written to Parameter Store, which deploy.sh materialises into the container's
