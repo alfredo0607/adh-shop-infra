@@ -97,6 +97,24 @@ resource "aws_cloudfront_cache_policy" "immutable_assets" {
   }
 }
 
+# No WAF attached, and this is a cost decision rather than an oversight.
+#
+# A web ACL costs about 5 USD/month plus 1 USD per rule and 0.60 USD per million
+# requests, so the managed core rule set lands around 6 to 10 USD/month — on a
+# project whose entire remaining footprint is close to free.
+#
+# What is given up: edge filtering of injection and cross-site scripting
+# attempts, and rate-based blocking by IP before a request ever reaches the
+# origin. The first matters less here than the scanner assumes — the data store
+# is DynamoDB, so there is no SQL to inject, and the API rejects unknown
+# properties at the boundary. The second is a genuine gap, and a rate-based WAF
+# rule would solve distributed rate limiting more cleanly than an in-process
+# counter or a cache in the private subnet, because it applies before the
+# request is billed or served.
+#
+# Attaching one is a single argument once the cost is accepted. Recorded as an
+# open decision rather than silently suppressed.
+#trivy:ignore:AWS-0011
 resource "aws_cloudfront_distribution" "this" {
   enabled             = true
   comment             = var.name
