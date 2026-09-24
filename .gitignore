@@ -38,3 +38,6 @@ terraform.tfvars
 .DS_Store
 Thumbs.db
 desktop.ini
+
+# Applied values, including the repository allowed to deploy
+terraform.tfvars

@@ -183,7 +183,14 @@ data "aws_iam_policy_document" "permissions" {
       "ssm:GetParameters",
       "ssm:GetParametersByPath",
     ]
-    resources = ["arn:aws:ssm:${var.region}:${var.account_id}:parameter${var.parameter_path}/*"]
+    # Both the path itself and everything under it. GetParametersByPath
+    # authorises against the path being queried, not only the parameters it
+    # returns, so "/adh-shop/*" alone is denied — which is how deploy.sh builds
+    # the container's environment, so every deployment would have failed.
+    resources = [
+      "arn:aws:ssm:${var.region}:${var.account_id}:parameter${var.parameter_path}",
+      "arn:aws:ssm:${var.region}:${var.account_id}:parameter${var.parameter_path}/*",
+    ]
   }
 
   statement {
@@ -236,7 +243,10 @@ data "aws_iam_policy_document" "permissions" {
       "ssm:PutParameter",
       "ssm:AddTagsToResource",
     ]
-    resources = ["arn:aws:ssm:${var.region}:${var.account_id}:parameter${var.parameter_path}/*"]
+    resources = [
+      "arn:aws:ssm:${var.region}:${var.account_id}:parameter${var.parameter_path}",
+      "arn:aws:ssm:${var.region}:${var.account_id}:parameter${var.parameter_path}/*",
+    ]
   }
 
   statement {
