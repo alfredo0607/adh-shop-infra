@@ -452,6 +452,15 @@ resource "aws_ssm_parameter" "region" {
   value = var.region
 }
 
+# The API lives on its own domain, so the storefront is always a different
+# origin and every call it makes is cross-origin. Without this list the API
+# answers no preflight, and the browser refuses every request.
+resource "aws_ssm_parameter" "cors_allowed_origins" {
+  name  = "${local.parameter_path}/CORS_ALLOWED_ORIGINS"
+  type  = "String"
+  value = join(",", var.storefront_origins)
+}
+
 resource "aws_ssm_parameter" "trust_proxy_hops" {
   name = "${local.parameter_path}/TRUST_PROXY_HOPS"
 
