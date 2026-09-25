@@ -47,6 +47,23 @@ variable "key_pair_name" {
   default     = null
 }
 
+variable "https_ingress_cidrs" {
+  type        = list(string)
+  default     = ["0.0.0.0/0"]
+  description = <<-EOT
+    Source ranges permitted to reach port 443.
+
+    Open by default. Behind a CDN, pass the CDN's ranges instead: anything else
+    lets a caller reach the origin directly, skipping the CDN's protection and
+    choosing its own X-Forwarded-For, which is what the rate limiter trusts.
+  EOT
+
+  validation {
+    condition     = length(var.https_ingress_cidrs) > 0 && alltrue([for cidr in var.https_ingress_cidrs : can(cidrnetmask(cidr))])
+    error_message = "https_ingress_cidrs must be a non-empty list of IPv4 CIDR blocks. An empty list would take the site offline."
+  }
+}
+
 variable "allowed_ssh_cidrs" {
   type        = list(string)
   description = <<-EOT
