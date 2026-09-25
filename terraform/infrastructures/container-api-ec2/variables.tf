@@ -186,3 +186,14 @@ variable "create_oidc_provider" {
   description = "False when the account already registers GitHub's provider; only one may exist"
   default     = true
 }
+
+variable "storefront_origins" {
+  type        = list(string)
+  description = "Origins allowed to call the API from a browser: scheme and host, no path or trailing slash"
+  default     = ["https://adh-shop.alfredo-dominguez.dev"]
+
+  validation {
+    condition     = alltrue([for origin in var.storefront_origins : can(regex("^https://[a-z0-9.-]+$", origin))])
+    error_message = "Each origin must be https://host, with no path, port or trailing slash. A browser sends the origin in exactly that form, and CORS compares it character for character."
+  }
+}
