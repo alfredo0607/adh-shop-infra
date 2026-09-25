@@ -134,6 +134,47 @@ resource "aws_s3_object" "scripts" {
 
 # ── Host ──────────────────────────────────────────────────────────────────────
 
+
+# ── Origin reachable only through Cloudflare ─────────────────────────────────
+#
+# Port 443 open to the world let callers reach nginx directly, around
+# Cloudflare. The API trusts two proxy hops when it reads the client address,
+# so a direct caller could put any address in X-Forwarded-For and get a fresh
+# rate-limit bucket on every request, with none of Cloudflare's DDoS protection
+# in the way.
+#
+# The ranges are read from Cloudflare on every plan rather than copied here, so
+# a range they add is picked up by the next apply instead of silently refusing
+# the visitors routed through it. If the list cannot be fetched, or comes back
+# short, the plan fails: applying a partial list would take the site offline.
+#
+# IPv4 only. The host has no IPv6 address, so Cloudflare reaches it over IPv4.
+data "http" "cloudflare_ipv4" {
+  url = "https://www.cloudflare.com/ips-v4"
+
+  lifecycle {
+    postcondition {
+      condition     = self.status_code == 200
+      error_message = "Could not fetch Cloudflare's IP ranges (HTTP ${self.status_code})."
+    }
+  }
+}
+
+locals {
+  cloudflare_ipv4_ranges = sort(compact([
+    for line in split("\n", data.http.cloudflare_ipv4.response_body) : trimspace(line)
+  ]))
+}
+
+check "cloudflare_ranges_look_complete" {
+  assert {
+    # Cloudflare has published between 14 and 15 IPv4 ranges for years. Far
+    # fewer means the response was truncated or is not the list at all.
+    condition     = length(local.cloudflare_ipv4_ranges) >= 10 && alltrue([for cidr in local.cloudflare_ipv4_ranges : can(cidrnetmask(cidr))])
+    error_message = "Cloudflare's IP range list looks incomplete or malformed."
+  }
+}
+
 module "container_host" {
   source = "../../modules/ec2-container-host"
 
@@ -150,6 +191,11 @@ module "container_host" {
 
   key_pair_name     = var.key_pair_name
   allowed_ssh_cidrs = var.allowed_ssh_cidrs
+
+  # The API is only reachable through Cloudflare. Its proxy must stay on: with
+  # DNS-only records, visitors would connect from their own addresses and be
+  # refused here.
+  https_ingress_cidrs = local.cloudflare_ipv4_ranges
 
   ecr_repository_arn = module.ecr.repository_arn
   scripts_bucket_arn = aws_s3_bucket.scripts.arn

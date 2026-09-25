@@ -15,6 +15,11 @@ terraform {
       source  = "hashicorp/random"
       version = "~> 3.6"
     }
+    # Reads Cloudflare's published IP ranges at plan time.
+    http = {
+      source  = "hashicorp/http"
+      version = "~> 3.4"
+    }
   }
 
   # Partial configuration. The bucket is created by bootstrap/remote-state and

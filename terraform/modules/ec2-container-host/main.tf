@@ -47,13 +47,18 @@ resource "aws_vpc_security_group_ingress_rule" "http" {
   cidr_ipv4         = "0.0.0.0/0"
 }
 
+# One rule per allowed range. Open to everyone by default; a stack that sits
+# behind a CDN narrows it to the CDN's ranges, so the origin cannot be reached
+# around it — see https_ingress_cidrs.
 resource "aws_vpc_security_group_ingress_rule" "https" {
+  for_each = toset(var.https_ingress_cidrs)
+
   security_group_id = aws_security_group.this.id
-  description       = "HTTPS"
+  description       = "HTTPS from ${each.value}"
   ip_protocol       = "tcp"
   from_port         = 443
   to_port           = 443
-  cidr_ipv4         = "0.0.0.0/0"
+  cidr_ipv4         = each.value
 }
 
 # SSH, opened to whatever the caller asks for — including the whole internet.
