@@ -20,7 +20,11 @@ PARAMETER_PATH="${PARAMETER_PATH:-/$PROJECT}"
 
 UPSTREAM_CONF="/etc/nginx/conf.d/upstreams/$APP.conf"
 CONTAINER_PORT=3000
-HEALTH_PATH="${HEALTH_PATH:-/health}"
+# Readiness, not liveness: traffic moves only to a container that can reach its
+# data store. /health answers as soon as the process is up, so a release whose
+# role cannot read the table would pass it and then fail every request, while
+# the working version it replaced was retired.
+HEALTH_PATH="${HEALTH_PATH:-/ready}"
 HEALTH_RETRIES=30
 HEALTH_INTERVAL=2
 
