@@ -1,167 +1,206 @@
 # ADH Shop — Infrastructure
 
-Terraform for the ADH Shop storefront. Single environment.
+Terraform for the ADH Shop platform on AWS: the network, the host running the API, the
+data store, the rate-limit cache, the private image CDN, the container registry, the
+configuration store and the identity GitHub deploys with. One environment, one region
+(`us-east-1`), one `terraform apply`.
 
-## Layout
+The API it runs lives in [adh-shop-api](https://github.com/alfredo0607/adh-shop-api), served
+at `https://adh-api.alfredo-dominguez.dev`.
 
-```
-terraform/
-├── bootstrap/
-│   └── remote-state/          S3 bucket holding every other stack's state
-├── infrastructures/
-│   └── container-api-ec2/     The whole platform in one apply: network, table,
-│                              registry, host, image CDN, optional cache
-├── modules/                   Reusable modules, one per resource group
-├── user-data/                 Instance boot scripts, rendered by templatefile()
-└── scripts/                   Operational scripts, uploaded to S3
-```
+---
 
-The API platform is one stack rather than four. Separating network, data,
-registry and host was justified on blast radius — a mistake while deploying the
-application should not be able to touch routing — and that argument holds when
-separate teams own separate layers and change them at different rates. It does
-not hold here: one person owns all of it, there is one environment, and it is
-short-lived. The separation bought ceremony rather than safety, at the price of
-four applies in a fixed order that had to be remembered.
+## Contents
 
-The image CDN belongs here too, because it depends on the API rather than
-standing beside it: CloudFront verifies signatures the API produces, so the
-signing key pair, the key group and the parameter the API reads it from have to
-be created together or not at all.
+1. [Architecture at a glance](#architecture-at-a-glance)
+2. [How a request travels](#how-a-request-travels)
+3. [Components](#components)
+4. [Network](#network)
+5. [The edge: Cloudflare in front of the origin](#the-edge-cloudflare-in-front-of-the-origin)
+6. [Private image delivery](#private-image-delivery)
+7. [Deployment pipeline](#deployment-pipeline)
+8. [Configuration and secrets](#configuration-and-secrets)
+9. [Security controls](#security-controls)
+10. [Observability](#observability)
+11. [Repository layout](#repository-layout)
+12. [First run](#first-run)
+13. [Operational runbook](#operational-runbook)
+14. [Cost](#cost)
+15. [Decisions and trade-offs](#decisions-and-trade-offs)
 
-## Network tiers
+---
 
-| Tier | Contents | Why |
-| --- | --- | --- |
-| Public | Container host (nginx + containers), elastic IP | Must answer on 80/443, and certbot's HTTP-01 challenge needs an inbound connection on port 80 |
-| Private | Valkey cache | No route to an internet gateway at all — stronger than a security group rule, because even a misconfigured group cannot expose it |
+## Architecture at a glance
 
-**There is no NAT gateway.** A NAT costs roughly 32 USD/month and is only needed
-when something in the private tier must reach the internet. Nothing here does.
-DynamoDB and S3 are reached through **gateway endpoints**, which are free and
-keep that traffic off the public internet entirely.
+![ADH Shop AWS architecture](docs/architecture.png)
 
-## First run
+| Line | Meaning |
+| --- | --- |
+| Solid black | Customer traffic: browser → Cloudflare → origin → nginx → API |
+| Solid blue | Data: DynamoDB through its gateway endpoint, the rate-limit cache, signed image delivery |
+| Solid red | Payment gateway: charges and status out, signed events back in through Cloudflare |
+| Dashed purple | Deployment and operations: OIDC, image push and pull, SSM commands, configuration, logs |
+| Dotted grey | Identity and encryption relationships |
 
-Nothing asks for an account id or a bucket name. Both are derived from whoever
-is authenticated, so the state a stack writes to always belongs to the account
-it is deploying into.
+The diagram is generated from code, in [`docs/diagrams/architecture.py`](docs/diagrams/architecture.py),
+with the official AWS icons. Its header explains how to regenerate it.
 
-```bash
-export AWS_PROFILE=<a profile that can create these resources>
-export AWS_REGION=us-east-1
+**In one paragraph.** Customers reach the API through Cloudflare. Cloudflare forwards to
+nginx on an EC2 instance in a public subnet, and nginx proxies to the API container on
+the loopback interface. The instance accepts HTTPS **only from Cloudflare's IP ranges**,
+so nobody can reach it around the edge. The API keeps its data in DynamoDB, reached
+privately through a VPC gateway endpoint, and its rate-limit counters in an ElastiCache
+Valkey cache that has no route to the internet at all. Product images sit in a private S3
+bucket behind CloudFront, served only through URLs the API signs. GitHub Actions deploys
+without any stored AWS key: it assumes a role through OIDC, pushes the image to ECR, and
+tells the host through SSM to run a blue/green switch.
 
-# 1. The state bucket. Local state, applied once.
-terraform -chdir=terraform/bootstrap/remote-state init
-terraform -chdir=terraform/bootstrap/remote-state apply
+## How a request travels
 
-# 2. The whole API platform.
-./scripts/tf-init.sh terraform/infrastructures/container-api-ec2
-terraform -chdir=terraform/infrastructures/container-api-ec2 apply
-```
+```mermaid
+sequenceDiagram
+    autonumber
+    participant B as Browser
+    participant C as Cloudflare edge
+    participant N as nginx (EC2)
+    participant A as API container
+    participant V as Valkey
+    participant D as DynamoDB
 
-That is the deployment. Every input has a working default, so
-`terraform.tfvars` is only needed to change one — narrowing SSH to a single
-address, or turning the cache on.
-
-### Why `tf-init.sh` rather than a backend file
-
-A `backend` block cannot use variables. Terraform resolves it before the
-variable system exists, so `bucket = var.state_bucket` is invalid by design. The
-usual workaround is a `backend.hcl`, which means the account id is either
-committed to a public repository or retyped by hand.
-
-The script derives the bucket from `sts get-caller-identity` and passes it with
-`-backend-config`, which removes both problems and also rules out initialising
-against the wrong account's state.
-
-State locking is native to S3 (`use_lockfile = true`, Terraform 1.10+). The
-separate DynamoDB lock table older guides require is no longer needed.
-
-## Deployment flow
-
-```
-CI ──push image──► ECR
-                    │
-   ┌────────────────▼─────────────────────────────────────┐
-   │ EC2, public subnet, elastic IP                       │
-   │                                                      │
-   │  nginx :80/:443 ──upstream──► 127.0.0.1:3000 (blue)  │
-   │    certbot / Let's Encrypt    127.0.0.1:3001 (green) │
-   └──────────────────────────────────────────────────────┘
-                    │
-        SSM Parameter Store  ·  DynamoDB  ·  S3 (scripts)
+    B->>C: HTTPS GET /api/v1/products
+    Note over C: TLS terminated at the edge.<br/>Adds X-Forwarded-For with the client IP.
+    C->>N: HTTPS from a Cloudflare range<br/>(any other source is dropped by the security group)
+    Note over N: Appends the edge address.<br/>Proxies to the active colour.
+    N->>A: http://127.0.0.1:3000
+    A->>V: rate-limit counter for the client IP (Lua, atomic)
+    V-->>A: 42 of 100 used this minute
+    A->>D: Query GSI1 via the gateway endpoint
+    D-->>A: products
+    A-->>N: 200 + signed image URLs
+    N-->>C: 200
+    C-->>B: 200
 ```
 
-**Once per host** — `bootstrap.sh` runs as user data: installs Docker, nginx and
-certbot, configures the CloudWatch agent, downloads the management scripts and
-logs in to ECR. It deploys nothing.
+The API trusts exactly **two proxy hops** when reading the client address: Cloudflare and
+nginx. That is only safe because the origin cannot be reached without passing through
+Cloudflare first. See [The edge](#the-edge-cloudflare-in-front-of-the-origin).
 
-**Once per application** — `add-keys.sh <env-file>` publishes configuration to
-Parameter Store; `add-api.sh <subdomain> <even-port> <email>` creates the nginx
-upstream and virtual host and obtains the certificate.
+## Components
 
-**Every release** — `deploy.sh <image> <app>` performs a blue/green switch.
+| Component | AWS resource | Configuration | Why it is there |
+| --- | --- | --- | --- |
+| Network | VPC, 2 public + 2 private subnets over 2 AZs, internet gateway | `10.20.0.0/16` | Isolates the tiers; private subnets have no internet route |
+| Private AWS access | VPC gateway endpoints for DynamoDB and S3 | Free | Data and script traffic never crosses the internet, and no NAT gateway is needed |
+| API host | EC2 `t3.micro`, Amazon Linux 2023, Elastic IP | gp3 20 GB encrypted, IMDSv2 required | Runs nginx and the API containers |
+| Reverse proxy | nginx + certbot on the host | Upstream per app, blue/green ports | TLS to the origin, one place to switch versions |
+| Firewall | Security group | 443 from Cloudflare's 15 IPv4 ranges; 80 for certificate renewal; 22 per `allowed_ssh_cidrs`; egress DNS/HTTP/HTTPS + cache only | The host is reachable only the intended way |
+| Data store | DynamoDB `adh-shop-store` | On-demand, single table, `GSI1` (projection ALL), TTL on `expiresAt`, encrypted | Products, customers, transactions, deliveries, idempotency keys |
+| Rate-limit cache | ElastiCache Serverless, Valkey 8 | Private subnets, IAM auth, TLS, capped at 1 GB and 5,000 ECPU/s | Shared counters so the limit holds across containers |
+| Container registry | ECR `adh-shop-api` | Immutable tags, scan on push, keeps 10 images, drops untagged after 1 day | Every release is an image tagged with its commit SHA |
+| Image storage | S3 assets bucket | Private, versioned, SSE-KMS with a dedicated key | Product images |
+| Image CDN | CloudFront + Origin Access Control + key group | `PriceClass_100`, HTTPS only, security headers policy (HSTS, `nosniff`, `DENY` framing) | Serves images only through signed, expiring URLs |
+| Configuration | SSM Parameter Store `/adh-shop/*` | `String` and `SecureString` | Single source of configuration and secrets |
+| Operational scripts | S3 scripts bucket | Private, versioned, encrypted | `deploy.sh`, `add-api.sh`, `add-keys.sh`, fetched by the host |
+| Host identity | IAM role + instance profile | Scoped to this table, `/adh-shop/*` parameters, this registry, this cache user | What the containers can touch, and nothing more |
+| Deploy identity | IAM role trusted through GitHub OIDC | Only the `production` environment of this repository | Deploys without long-lived AWS keys |
+| Logs | CloudWatch log groups | nginx access/error, bootstrap, VPC flow logs (rejects, 30 days) | Incident investigation |
+| Terraform state | S3 bucket (bootstrap stack) | Versioned, KMS-encrypted, native S3 locking | Shared, locked state |
 
-## Deployments are blue/green
+## Network
 
-`deploy.sh` starts the new version on the idle port of the pair, waits for it to
-answer `/health`, then repoints the nginx upstream and reloads. Only once traffic
-has moved is the old container retired.
+```mermaid
+flowchart TB
+    internet(("Internet"))
+    subgraph vpc["VPC 10.20.0.0/16"]
+        igw["Internet gateway"]
+        subgraph a["us-east-1a"]
+            pubA["public 10.20.1.0/24<br/>EC2 host"]
+            privA["private 10.20.11.0/24<br/>Valkey"]
+        end
+        subgraph b["us-east-1b"]
+            pubB["public 10.20.2.0/24<br/>(spare)"]
+            privB["private 10.20.12.0/24<br/>Valkey"]
+        end
+        rtPub["Public route table<br/>0.0.0.0/0 → IGW<br/>+ DynamoDB, S3 prefix lists"]
+        rtPriv["Private route table<br/>local only<br/>+ DynamoDB, S3 prefix lists"]
+    end
 
-If the new image fails to start or never becomes healthy, the deployment aborts
-and the previous version is still serving. Nothing changed.
+    internet <--> igw
+    igw --- rtPub
+    rtPub --- pubA & pubB
+    rtPriv --- privA & privB
+```
 
-Containers publish on `127.0.0.1` only. The security group opens 80 and 443 and
-nothing else, so the application is reachable exclusively through the proxy —
-and therefore only over TLS.
+| Tier | Contents | Route to the internet | Why |
+| --- | --- | --- | --- |
+| Public | The container host | Yes, through the internet gateway | It must be reachable by Cloudflare and by Let's Encrypt |
+| Private | The Valkey cache | **None** | Stronger than any security group rule: even a misconfigured group cannot expose it |
 
-## Configuration and secrets
+**There is no NAT gateway.** A NAT costs roughly 32 USD a month and is only needed when
+something in the private tier must reach the internet. Nothing does. DynamoDB and S3 are
+reached through gateway endpoints, which are free and keep that traffic on AWS's network.
 
-Parameter Store is the source of truth. Secrets are never stored in S3, never
-committed, and never written to a long-lived file on the host.
+The cache spans two AZs because ElastiCache Serverless requires subnets in at least two.
+The host runs in one: a single instance is a deliberate trade for this environment (see
+[Decisions](#decisions-and-trade-offs)).
 
-`deploy.sh` reads the parameters at deploy time into a file created with
-`umask 077` and removed by a trap, so the values exist on disk only for the few
-seconds Docker needs to read them. The instance role is scoped to
-`/adh-shop/*`, so a compromise of this host cannot read another service's
-credentials.
+## The edge: Cloudflare in front of the origin
 
-## Security decisions worth knowing
+DNS for `adh-api.alfredo-dominguez.dev` is **proxied** by Cloudflare (orange cloud).
+Clients connect to Cloudflare, which connects to the origin's Elastic IP.
 
-- **IMDSv2 required.** With IMDSv1 enabled, a single SSRF in the application is
-  enough to read the instance role's temporary credentials.
-- **Application ports are not in the security group.** Exposing one would let
-  anyone reach the app directly over plain HTTP, bypassing nginx, the
-  certificate and the HTTPS redirect.
-- **SSH is open to `0.0.0.0/0` by default**, which is a deliberate choice rather
-  than an oversight: it collects credential-stuffing traffic from the moment the
-  address is reachable. `allowed_ssh_cidrs` narrows it to a single address, and
-  an empty list closes the port entirely — Session Manager still works, since it
-  needs no inbound rule.
-- **Encryption at rest** on the root volume, the state bucket, the scripts
-  bucket, DynamoDB and ECR.
-- **VPC flow logs** record rejected traffic, so "was this host reached from
-  outside?" is answerable after the fact.
-- **The instance role has DynamoDB data-plane permissions only.** It cannot
-  create, alter or delete a table.
+The security group accepts port 443 **only from Cloudflare's published IPv4 ranges**, one
+rule per range. Terraform fetches them from `https://www.cloudflare.com/ips-v4` on every
+plan, so a range Cloudflare adds is picked up by the next apply. The plan fails if the
+list cannot be fetched or looks incomplete, so a partial list, which would take the site
+offline, is never applied.
 
-## CI
+Why this matters: the API reads the client address through two trusted proxies to rate
+limit per client. Before this restriction, a caller could connect straight to the origin
+and put any address in `X-Forwarded-For`, getting a fresh rate-limit bucket on every
+request and skipping Cloudflare's DDoS protection entirely. That was reproduced against
+production and is closed. Direct connections to the origin now time out.
 
-Runs without AWS credentials: `terraform fmt -check`, `validate` on every stack
-with `-backend=false`, `tflint`, a Trivy configuration scan, and ShellCheck over
-the operational scripts.
+> [!WARNING]
+> **The Cloudflare proxy must stay enabled** on the API's DNS record. With "DNS only"
+> (grey cloud), visitors would connect from their own addresses and be refused by the
+> security group.
 
-## Image delivery
+Port 80 stays open for certbot's HTTP-01 renewal and only redirects to HTTPS. Replacing
+the Let's Encrypt certificate with a Cloudflare Origin CA certificate would allow closing
+it.
 
-Product images live in a private bucket and are served through CloudFront
-**only with a signed URL the API issues**. Possessing the address is not enough:
-the URL has to have been granted, and it expires.
+## Private image delivery
 
-Two controls, and both must pass. Origin Access Control is the only path to the
-bucket, so the object cannot be fetched directly. `trusted_key_groups` on the
-distribution means an unsigned request is rejected at the edge, before the
-origin is touched.
+```mermaid
+sequenceDiagram
+    autonumber
+    participant B as Browser
+    participant A as API
+    participant CF as CloudFront
+    participant S3 as S3 assets (private, KMS)
+
+    B->>A: GET /api/v1/products
+    A->>A: sign URL with the private key from SSM<br/>expiry aligned to a 1-hour window
+    A-->>B: imageUrl = https://…cloudfront.net/product/x.webp?Expires&Signature&Key-Pair-Id
+    B->>CF: GET signed URL
+    Note over CF: Key group verifies the signature<br/>unsigned or tampered → 403 at the edge
+    CF->>S3: Origin Access Control (SigV4)
+    S3-->>CF: object (decrypted with KMS)
+    CF-->>B: image/webp, cached at the edge
+```
+
+Two independent controls, and both must pass:
+
+- **Origin Access Control** is the only way into the bucket. The bucket policy allows
+  `s3:GetObject` to CloudFront, conditioned on this distribution's ARN. The KMS key policy
+  lets CloudFront decrypt under the same condition.
+- **`trusted_key_groups`** on the distribution rejects any request without a valid
+  signature at the edge, before the origin is touched.
+
+Signed URLs expire at the end of an aligned hour window, so everyone gets the same URL for
+an hour. Browsers and CloudFront can cache the image instead of treating every response as
+a new URL.
 
 ### The signing key never passes through Terraform
 
@@ -174,55 +213,243 @@ aws s3 cp private.pem s3://<scripts bucket>/keys/cloudfront/private.pem
 rm private.pem
 ```
 
-Only the public half is read by Terraform, from `public_key.pem` in the stack
-directory. A public key is not a secret, so it is committed — with a `.gitignore`
-exception written as a full path rather than a filename, because `!public_key.pem`
-on its own would let a private key slip through under that name.
+Only the public half is read by Terraform, from `public_key.pem` in the stack directory. A
+public key is not a secret, so it is committed, with a `.gitignore` exception written as a
+full path rather than a filename, because `!public_key.pem` on its own would let a private
+key slip through under that name.
 
-The private half travels S3 → Parameter Store → deleted. `add-keys.sh` pulls it
-into a directory created with mode 700, writes it as a `SecureString`, and a
-trap shreds and removes that directory on any exit — success, failure or
-interrupt. The window in which a private key exists on disk is the seconds
-between those two steps.
+The private half travels S3 → Parameter Store → deleted. `add-keys.sh` pulls it into a
+directory created with mode 700, writes it as a `SecureString`, and a trap shreds and
+removes that directory on any exit. Generating it in Terraform would be fewer steps, but
+the key would then live in state: a file read on every plan, by anyone who can run one.
 
-Generating it in Terraform would be fewer steps, but the key would then live in
-state: a file read on every plan, by anyone who can run one, long after the
-moment it was needed.
+CloudFront trusts a *key group* rather than a key. That indirection makes rotation
+possible without downtime: add a second key, let clients migrate, then remove the first.
 
-CloudFront trusts a *key group* rather than a key. The indirection is what makes
-rotation possible: add a second key, let clients migrate, remove the first —
-with no window in which no key is valid.
+## Deployment pipeline
 
-## Storefront delivery
+```mermaid
+flowchart LR
+    pr["Pull request"] --> ci
+    subgraph ci["CI · every pull request"]
+        direction TB
+        q["lint · typecheck · 479 tests<br/>vs Redis + DynamoDB Local"]
+        au["dependency audit"]
+        img["build image · start it vs DynamoDB Local<br/>probe /ready, /api/docs-json, CORS preflight"]
+    end
+    ci --> merge["merge to main"]
+    merge --> cd
+    subgraph cd["CD · GitHub Actions, environment 'production'"]
+        direction TB
+        oidc["assume adh-shop-github-deploy<br/>via OIDC · no stored keys"]
+        push["build → push to ECR<br/>tag = commit SHA (immutable)"]
+        send["ssm:SendCommand<br/>deploy.sh image app"]
+        oidc --> push --> send
+    end
+    send --> host
+    subgraph host["EC2 · deploy.sh (blue/green)"]
+        direction TB
+        s1["pull image · read /adh-shop/* into a 600 file"]
+        s2["start new colour on the idle port"]
+        s3{"/ready answers?<br/>(reads DynamoDB)"}
+        s4["switch nginx upstream · reload"]
+        s5["retire old colour"]
+        rb["remove new container<br/>old one keeps serving"]
+        s1 --> s2 --> s3
+        s3 -- "yes" --> s4 --> s5
+        s3 -- "no, after 60 s" --> rb
+    end
+```
 
-Not built yet. The SPA needs somewhere to live and it is not this CDN, whose
-distribution requires a signature on every request — a browser loading
-`index.html` has no signature to present.
+- **No AWS keys in GitHub.** The deploy role trusts GitHub's OIDC provider, and only
+  tokens for this repository's `production` environment. The trust policy matches the
+  immutable numeric owner and repository ids, not their names, so a renamed or
+  re-registered repository cannot inherit it. Which branch may deploy is enforced by
+  GitHub on the environment.
+- **The deploy role can do three things**: push to this ECR repository, send
+  `AWS-RunShellScript` to this one instance, and read the result.
+- **Blue/green with a readiness gate.** The new container must answer `/ready`, which
+  performs a real DynamoDB read, before traffic moves. A release that cannot reach its data
+  is never switched to. Existing connections drain on `nginx reload`, and the old container
+  is removed only after traffic has moved.
+- **Rollback is automatic** when the new version never becomes ready: nothing was switched.
+  Rolling back a bad release that *did* pass is re-running the deploy with the previous
+  image SHA; tags are immutable, so that image is exactly what ran before.
 
-## Rate limiter cache
+## Configuration and secrets
 
-Valkey Serverless in the private tier, authenticated with IAM. There is no
-password anywhere — not in state, not in Parameter Store, not in an environment
-variable. The host exchanges its instance role for a short-lived token on each
-connection, and IAM auth requires TLS.
+Parameter Store is the single source of truth. Values the infrastructure knows (table
+name, cache endpoint, CDN domain, key pair id, trusted proxy hops, allowed CORS origin) are
+**written by Terraform**, so nobody copies them by hand. Secrets are published separately
+with `add-keys.sh` and **never pass through Terraform state**.
 
-The cache identity is scoped to one key prefix and to read, write and scripting
-commands. If the application is compromised, the blast radius on the cache is
-that prefix.
+| Parameter | Type | Written by |
+| --- | --- | --- |
+| `DYNAMODB_TABLE_NAME`, `AWS_REGION` | String | Terraform |
+| `REDIS_HOST`, `REDIS_PORT`, `REDIS_TLS`, `REDIS_USERNAME`, `REDIS_CACHE_NAME` | String | Terraform |
+| `CDN_DOMAIN`, `CDN_KEY_PAIR_ID` | String | Terraform |
+| `TRUST_PROXY_HOPS` (= 2), `CORS_ALLOWED_ORIGINS` | String | Terraform |
+| `PAYMENT_API_URL` | String | `add-keys.sh` |
+| `PAYMENT_PUBLIC_KEY`, `PAYMENT_PRIVATE_KEY`, `PAYMENT_INTEGRITY_SECRET`, `PAYMENT_EVENTS_SECRET` | SecureString | `add-keys.sh` |
+| `CDN_PRIVATE_KEY` | SecureString | `add-keys.sh` |
 
-`cache_usage_limits` caps storage and compute. Serverless bills by both and
-neither is bounded by default, so a key leak or a deliberate attempt to inflate
-the key space throttles instead of producing an unbounded bill.
+At deploy time, `deploy.sh` reads `/adh-shop/*` into a file created with `umask 077` and
+removed by a trap, so the values exist on disk only for the seconds Docker needs to read
+them. Multi-line values, such as the PEM key, are published to the container
+base64-encoded as `<NAME>_BASE64`. The instance role can read only `/adh-shop/*`.
 
-Permission to connect is attached from the cache stack to the role the container
-stack created, rather than granted there against a name that does not exist yet.
-Both ARNs come from the resources themselves, so renaming the cache cannot leave
-a stale grant behind.
+The cache has **no password anywhere**. The host signs a short-lived IAM token with its
+instance role on every connection, and IAM auth requires TLS. The cache user may run read,
+write and scripting commands on one key prefix, so a compromised application can touch
+only the rate-limit counters.
 
-Apply order: `network` → `data-store` → `container-api-ec2` → `cache`.
+## Security controls
 
-**Cost.** Serverless has a minimum billed storage footprint, roughly 6 to 7 USD
-a month in us-east-1 even with no traffic. Valkey is materially cheaper than
-Redis OSS here, but it is not free; the historic ElastiCache free tier covered
-`t*.micro` nodes rather than serverless. Confirm against your own billing
-console.
+| Layer | Control |
+| --- | --- |
+| Edge | Cloudflare proxy; origin accepts HTTPS only from Cloudflare's ranges |
+| Transport | HTTPS end to end; HSTS from the API and on CloudFront responses |
+| Host | IMDSv2 required, so an SSRF in the app cannot read instance credentials; encrypted root volume; application ports never in the security group, and containers bound to `127.0.0.1` |
+| Network | Cache in subnets with no internet route; egress limited to DNS, HTTP(S) and the cache |
+| Identity | No long-lived keys: instance role for the host, OIDC role for CI, IAM tokens for the cache |
+| Least privilege | Host role: DynamoDB **data plane** only on this table (cannot create or drop tables), `/adh-shop/*` parameters, this registry, this cache user |
+| Data at rest | DynamoDB, S3 (state, scripts, assets with KMS), ECR, EBS encrypted |
+| Images | Private bucket, Origin Access Control, signed and expiring URLs |
+| Supply chain | Immutable image tags, ECR scan on push, `pnpm audit` in CI, Trivy config scan of this repository |
+| Audit | VPC flow logs of rejected traffic, 30 days; nginx logs in CloudWatch |
+
+**SSH** is controlled by `allowed_ssh_cidrs`. It defaults to open, which is a visible,
+documented choice rather than an oversight. A `/32` narrows it to one address, and an
+empty list closes the port entirely, while Session Manager keeps working because it needs no
+inbound rule. All operational work in this project (deploys, script sync, diagnostics) goes
+through SSM rather than SSH.
+
+## Observability
+
+| Signal | Where |
+| --- | --- |
+| HTTP access and errors at the proxy | CloudWatch `/adh-shop-container-host/nginx/access` and `/nginx/error` |
+| Host bootstrap | CloudWatch, bootstrap log group |
+| Rejected network traffic | CloudWatch VPC flow logs, 30 days |
+| Application logs | Structured JSON (pino) with a request id per request, on the container's stdout; `docker logs` on the host |
+| Liveness / readiness | `/health` (process up) · `/ready` (DynamoDB readable), used by the image `HEALTHCHECK` and the deploy gate |
+| Deploy history | GitHub Actions runs and SSM command history |
+
+Shipping the container's stdout to CloudWatch (the `awslogs` Docker log driver) is the next
+step if more than one host ever runs the API.
+
+## Repository layout
+
+```
+terraform/
+├── bootstrap/
+│   └── remote-state/          S3 bucket holding the state of every other stack
+├── infrastructures/
+│   └── container-api-ec2/     The whole platform in one apply
+├── modules/
+│   ├── vpc/                   Subnets, route tables, gateway endpoints, flow logs
+│   ├── ec2-container-host/    Instance, security group, host IAM role
+│   ├── dynamodb/              The single table, GSI1, TTL
+│   ├── valkey-cache/          Serverless cache, IAM user, user group
+│   ├── ecr/                   Registry and lifecycle policy
+│   ├── s3-private-assets/     Private, versioned, encrypted bucket
+│   ├── kms/                   Customer-managed key
+│   ├── cloudfront-cdn/        Distribution, OAC, key group, security headers
+│   └── iam-github-oidc/       Deploy role trusted by GitHub OIDC
+├── user-data/                 Instance boot script, rendered by templatefile()
+└── scripts/                   deploy.sh, add-api.sh, add-keys.sh, uploaded to S3
+scripts/
+├── tf-init.sh                 Initialises a stack against the right state bucket
+└── test-deploy-scripts.sh     Checks the operational scripts
+docs/
+├── architecture.png           The diagram at the top of this README
+└── diagrams/architecture.py   Its source, with the official AWS icons
+```
+
+## First run
+
+Nothing asks for an account id or a bucket name. Both are derived from whoever is
+authenticated, so the state a stack writes to always belongs to the account it is
+deploying into.
+
+```bash
+export AWS_PROFILE=<a profile that can create these resources>
+export AWS_REGION=us-east-1
+
+# 1. The state bucket. Local state, applied once.
+terraform -chdir=terraform/bootstrap/remote-state init
+terraform -chdir=terraform/bootstrap/remote-state apply
+
+# 2. The whole platform.
+./scripts/tf-init.sh terraform/infrastructures/container-api-ec2
+terraform -chdir=terraform/infrastructures/container-api-ec2 apply
+```
+
+Then, once, following the stack's `next_steps` output:
+
+1. Point the API's DNS record at the Elastic IP, **proxied** through Cloudflare.
+2. Publish the secrets: `add-keys.sh <env-file>`.
+3. Publish the site: `add-api.sh <subdomain> 3000 <email>`, which creates the nginx
+   upstream and virtual host and obtains the certificate.
+4. Deploy. From then on, merging to `main` in adh-shop-api deploys automatically.
+
+**Why `tf-init.sh` rather than a backend file.** A `backend` block cannot use variables, so
+the usual `backend.hcl` means either committing the account id to a public repository or
+retyping it. The script derives the bucket from `sts get-caller-identity`, which also rules
+out initialising against another account's state. Locking is native to S3
+(`use_lockfile = true`, Terraform 1.10+).
+
+## Operational runbook
+
+| Task | How |
+| --- | --- |
+| Change infrastructure | Pull request → CI (`fmt`, `validate`, `tflint`, Trivy, ShellCheck) → merge → `terraform plan -out` → review → `apply` |
+| Update an operational script | Merge, `apply` (uploads to S3), then sync on the host: `aws s3 sync s3://<scripts bucket>/scripts/ /opt/adh-shop/` through SSM |
+| Redeploy an image | `sudo -u ec2-user /opt/adh-shop/deploy.sh <ecr-uri>:<sha> adh-api` through SSM |
+| Roll back | The same, with the previous SHA |
+| Rotate a secret | `aws ssm put-parameter --overwrite …`, then redeploy so the container reads it |
+| Inspect the host | Session Manager; no SSH key needed |
+| Cloudflare adds IP ranges | Nothing to edit: the next `plan` fetches the new list |
+
+## Cost
+
+Approximate monthly cost in `us-east-1` for this environment at demo traffic. Confirm in
+the billing console.
+
+| Item | Approx. USD / month | Note |
+| --- | ---: | --- |
+| EC2 `t3.micro` | 7.60 | Free-tier eligible during an account's first year |
+| Public IPv4 (Elastic IP) | 3.60 | AWS charges for every public IPv4 address |
+| ElastiCache Serverless (Valkey) | 6–7 | Minimum billed storage even when idle |
+| KMS customer-managed key | 1.00 | Assets bucket |
+| DynamoDB on-demand, S3, ECR, CloudFront, CloudWatch | < 2 | Pay per use; mostly within free tiers at this volume |
+| NAT gateway | 0 | Deliberately absent (~32 would apply otherwise) |
+| **Total** | **≈ 20** | |
+
+## Decisions and trade-offs
+
+**One stack rather than four.** Network, data, registry, host, CDN and cache were once
+separate stacks. That separation earns its keep when different teams own layers that
+change at different rates. Here one person owns everything in one short-lived environment,
+so it bought ceremony rather than safety, at the price of four applies in a fixed order.
+The image CDN in particular belongs with the API: CloudFront verifies signatures the API
+produces, so the key pair, the key group and the parameter the API reads have to be
+created together.
+
+**A single EC2 host rather than ECS or an auto scaling group.** Cheapest option that still
+gives zero-downtime deploys (blue/green on one host) and automatic rollback. The cost is
+that one instance is a single point of failure: an AZ outage takes the API down until it
+is recreated. The application is already stateless, since state lives in DynamoDB and
+Valkey. Moving to ECS on Fargate behind a load balancer across two AZs would change the
+host module and the deploy step, not the application.
+
+**Cloudflare in front rather than an ALB.** TLS, DDoS protection and caching at no cost,
+with the origin locked to Cloudflare's ranges. An ALB would add about 16 USD a month and
+would still need the same origin lock-down to prevent bypass.
+
+**Valkey Serverless rather than a node.** No capacity to size, TLS and IAM auth built in,
+and usage caps that turn a runaway key space into throttling instead of an unbounded bill.
+Valkey is cheaper than Redis OSS on ElastiCache.
+
+**Gateway endpoints rather than a NAT gateway.** The only AWS services the private tier and
+the host need privately are DynamoDB and S3, which gateway endpoints cover for free.
