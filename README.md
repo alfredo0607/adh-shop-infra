@@ -34,16 +34,17 @@ at `https://adh-api.alfredo-dominguez.dev`.
 
 ![ADH Shop AWS architecture](docs/architecture.png)
 
-| Line | Meaning |
-| --- | --- |
-| Solid black | Customer traffic: browser → Cloudflare → origin → nginx → API |
-| Solid blue | Data: DynamoDB through its gateway endpoint, the rate-limit cache, signed image delivery |
-| Solid red | Payment gateway: charges and status out, signed events back in through Cloudflare |
-| Dashed purple | Deployment and operations: OIDC, image push and pull, SSM commands, configuration, logs |
-| Dotted grey | Identity and encryption relationships |
+The numbered steps are explained in the panel on the right of the diagram: **1–8** follow a
+checkout request, and **A–D** follow a release from GitHub to the host. Line colours: black
+for customer traffic, blue for data and images, red for the payment gateway, dashed purple
+for deployment and operations.
 
-The diagram is generated from code, in [`docs/diagrams/architecture.py`](docs/diagrams/architecture.py),
-with the official AWS icons. Its header explains how to regenerate it.
+The diagram uses the official AWS 2024 icon set and group conventions (AWS Cloud, Region,
+VPC, Availability Zones, public and private subnets, security group). Its source is
+[`docs/diagrams/architecture.drawio`](docs/diagrams/architecture.drawio): open it in
+[diagrams.net](https://app.diagrams.net) to edit it, or regenerate it from
+[`build_architecture.py`](docs/diagrams/build_architecture.py), whose header has the export
+command.
 
 **In one paragraph.** Customers reach the API through Cloudflare. Cloudflare forwards to
 nginx on an EC2 instance in a public subnet, and nginx proxies to the API container on
@@ -362,8 +363,10 @@ scripts/
 ├── tf-init.sh                 Initialises a stack against the right state bucket
 └── test-deploy-scripts.sh     Checks the operational scripts
 docs/
-├── architecture.png           The diagram at the top of this README
-└── diagrams/architecture.py   Its source, with the official AWS icons
+├── architecture.png                The diagram at the top of this README
+└── diagrams/
+    ├── architecture.drawio         Its editable source (diagrams.net)
+    └── build_architecture.py       Generates the .drawio on a grid
 ```
 
 ## First run
