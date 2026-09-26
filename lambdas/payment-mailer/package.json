@@ -1,0 +1,20 @@
+{
+  "name": "payment-mailer",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Emails the buyer when a payment is approved or refused, from the API's payment events",
+  "type": "module",
+  "main": "src/handler.mjs",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "test": "node --test --experimental-test-coverage --test-coverage-lines=80 --test-coverage-branches=80 --test-coverage-include=src/**"
+  },
+  "dependencies": {
+    "nodemailer": "10.0.10"
+  },
+  "devDependencies": {
+    "@aws-sdk/client-ssm": "3.1141.0"
+  }
+}

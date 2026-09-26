@@ -41,3 +41,9 @@ desktop.ini
 
 # Applied values, including the repository allowed to deploy
 terraform.tfvars
+
+# Lambda packages: dependencies and the directory Terraform zips
+lambdas/*/node_modules/
+lambdas/*/build/
+# Lambda zips produced by archive_file
+terraform/**/.package/

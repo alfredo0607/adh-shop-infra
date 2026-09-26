@@ -20,6 +20,11 @@ terraform {
       source  = "hashicorp/http"
       version = "~> 3.4"
     }
+    # Zips the payment email Lambda.
+    archive = {
+      source  = "hashicorp/archive"
+      version = "~> 2.7"
+    }
   }
 
   # Partial configuration. The bucket is created by bootstrap/remote-state and

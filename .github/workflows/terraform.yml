@@ -85,7 +85,9 @@ jobs:
         run: |
           sudo apt-get update && sudo apt-get install -y shellcheck
           shellcheck --severity=warning \
-            terraform/scripts/container-api-ec2/*.sh
+            terraform/scripts/container-api-ec2/*.sh \
+            terraform/scripts/payment-mailer/*.sh \
+            lambdas/*/build.sh
 
       # ShellCheck reads syntax, not behaviour. Splitting an nginx directive on
       # ":" is valid shell that returns "3000;" instead of "3000", and only a
@@ -93,3 +95,37 @@ jobs:
       # found, one of them against the live host.
       - name: Parsing behaviour
         run: ./scripts/test-deploy-scripts.sh
+
+  lambda:
+    name: Payment mailer Lambda
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    defaults:
+      run:
+        working-directory: lambdas/payment-mailer
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # The runtime the function is deployed on.
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: lambdas/payment-mailer/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      # Fails below 80% line or branch coverage.
+      - name: Test with coverage
+        run: npm test
+
+      - name: Audit production dependencies
+        run: npm audit --omit=dev --audit-level=high
+
+      # The package Terraform zips: proves it builds with production
+      # dependencies only.
+      - name: Build the package
+        run: ./build.sh

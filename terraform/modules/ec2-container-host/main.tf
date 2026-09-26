@@ -239,6 +239,18 @@ data "aws_iam_policy_document" "permissions" {
     }
   }
 
+  # Send only. The host cannot read, delete or purge these queues, so the API
+  # can hand work off but never consume or discard it.
+  dynamic "statement" {
+    for_each = length(var.sqs_send_queue_arns) > 0 ? [1] : []
+
+    content {
+      sid       = "SendToQueues"
+      actions   = ["sqs:SendMessage"]
+      resources = var.sqs_send_queue_arns
+    }
+  }
+
   # add-keys.sh publishes key material pulled from the scripts bucket. Write is
   # scoped to this project's parameter path, so a compromised host cannot
   # overwrite another service's configuration.
