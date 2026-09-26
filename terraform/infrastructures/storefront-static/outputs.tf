@@ -21,13 +21,15 @@ output "site_url" {
   value = "https://${var.domain_name}"
 }
 
-# The three values the storefront's workflow needs, as variables of its
-# production environment.
+# What the storefront's workflow needs, as variables of its production
+# environment. Same names as the API's environment where they mean the same.
 output "github_environment_variables" {
   value = {
-    AWS_DEPLOY_ROLE_ARN = module.deploy_role.role_arn
-    SITE_BUCKET         = module.site.bucket_name
-    DISTRIBUTION_ID     = module.site.distribution_id
+    AWS_DEPLOY_ROLE   = module.deploy_role.role_arn
+    AWS_REGION        = var.region
+    SITE_BUCKET       = module.site.bucket_name
+    DISTRIBUTION_ID   = module.site.distribution_id
+    VITE_API_BASE_URL = var.api_origin
   }
 }
 
