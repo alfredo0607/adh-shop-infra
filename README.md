@@ -6,7 +6,9 @@ configuration store and the identity GitHub deploys with. One environment, one r
 (`us-east-1`), one `terraform apply`.
 
 The API it runs lives in [adh-shop-api](https://github.com/alfredo0607/adh-shop-api), served
-at `https://adh-api.alfredo-dominguez.dev`.
+at `https://adh-api.alfredo-dominguez.dev`. A second, small stack hosts the storefront from
+[adh-shop-web](https://github.com/alfredo0607/adh-shop-web) at
+`https://adh-shop.alfredo-dominguez.dev`; see [Storefront hosting](#storefront-hosting).
 
 ---
 
@@ -18,15 +20,16 @@ at `https://adh-api.alfredo-dominguez.dev`.
 4. [Network](#network)
 5. [The edge: Cloudflare in front of the origin](#the-edge-cloudflare-in-front-of-the-origin)
 6. [Private image delivery](#private-image-delivery)
-7. [Deployment pipeline](#deployment-pipeline)
-8. [Configuration and secrets](#configuration-and-secrets)
-9. [Security controls](#security-controls)
-10. [Observability](#observability)
-11. [Repository layout](#repository-layout)
-12. [First run](#first-run)
-13. [Operational runbook](#operational-runbook)
-14. [Cost](#cost)
-15. [Decisions and trade-offs](#decisions-and-trade-offs)
+7. [Storefront hosting](#storefront-hosting)
+8. [Deployment pipeline](#deployment-pipeline)
+9. [Configuration and secrets](#configuration-and-secrets)
+10. [Security controls](#security-controls)
+11. [Observability](#observability)
+12. [Repository layout](#repository-layout)
+13. [First run](#first-run)
+14. [Operational runbook](#operational-runbook)
+15. [Cost](#cost)
+16. [Decisions and trade-offs](#decisions-and-trade-offs)
 
 ---
 
@@ -227,6 +230,45 @@ the key would then live in state: a file read on every plan, by anyone who can r
 CloudFront trusts a *key group* rather than a key. That indirection makes rotation
 possible without downtime: add a second key, let clients migrate, then remove the first.
 
+## Storefront hosting
+
+The storefront is a static build: HTML, JavaScript and CSS, with no server of its own. It
+lives in `terraform/infrastructures/storefront-static`, a separate stack with its own
+state.
+
+```mermaid
+flowchart LR
+    B[Browser] -->|HTTPS, DNS only in Cloudflare| CF[CloudFront<br/>adh-shop.alfredo-dominguez.dev]
+    CF -->|viewer request| FN[Function: app routes → /index.html]
+    CF -->|Origin Access Control| S3[(S3 storefront<br/>private, versioned)]
+    B -->|fetch| API[API behind Cloudflare]
+    B -->|img| IMG[Image CDN, signed URLs]
+    GH[GitHub Actions<br/>adh-shop-web] -->|OIDC role: sync + invalidate| S3
+```
+
+| Concern | How |
+| --- | --- |
+| Reaching the files | Private bucket; only this distribution reads it, through OAC and a bucket policy conditioned on its ARN |
+| Deep links (`/checkout`, `/orders/…`) | A CloudFront Function rewrites paths without a file extension to `/index.html`. A missing `/assets/x.js` stays a 403 instead of becoming HTML with a 200 |
+| TLS | ACM certificate for the domain, TLS 1.2 minimum, HTTP/2 and HTTP/3 |
+| Headers | Content-Security-Policy, HSTS, `nosniff`, `X-Frame-Options: DENY`, Referrer-Policy, Permissions-Policy |
+| Caching | Set per file at upload: hashed files under `assets/` are immutable for a year, everything else is revalidated. A release never serves an old `index.html` pointing at deleted bundles |
+| Rollback | Bucket versioning keeps previous releases for 30 days |
+| Deployment | A role only the storefront's `production` environment can assume; it can write that bucket and invalidate that distribution, nothing else |
+
+**The Content-Security-Policy** is built from what the storefront actually calls: `'self'`
+for scripts, the API and the payment gateway's tokenisation host for `connect-src`, and the
+image CDN's domain for `img-src`, read from the API stack's state so it cannot drift. Styles
+allow `'unsafe-inline'`, because the dialogs' scroll lock injects a `<style>` element at
+runtime; styles cannot run code, and scripts stay `'self'` only. The gateway host is a
+variable in the ignored `terraform.tfvars` (see `terraform.tfvars.example`).
+
+**DNS only, not proxied.** The storefront's record in Cloudflare points at CloudFront with
+the grey cloud. Proxying it would put one CDN in front of another: two caches to invalidate
+on every release, and Cloudflare's TLS in front of a certificate CloudFront already serves.
+The API is different: its origin is a single instance that must be hidden behind
+Cloudflare.
+
 ## Deployment pipeline
 
 ```mermaid
@@ -346,7 +388,8 @@ terraform/
 ├── bootstrap/
 │   └── remote-state/          S3 bucket holding the state of every other stack
 ├── infrastructures/
-│   └── container-api-ec2/     The whole platform in one apply
+│   ├── container-api-ec2/     The whole platform in one apply
+│   └── storefront-static/     The storefront: bucket, distribution, certificate, deploy role
 ├── modules/
 │   ├── vpc/                   Subnets, route tables, gateway endpoints, flow logs
 │   ├── ec2-container-host/    Instance, security group, host IAM role
@@ -356,7 +399,9 @@ terraform/
 │   ├── s3-private-assets/     Private, versioned, encrypted bucket
 │   ├── kms/                   Customer-managed key
 │   ├── cloudfront-cdn/        Distribution, OAC, key group, security headers
-│   └── iam-github-oidc/       Deploy role trusted by GitHub OIDC
+│   ├── static-site/           Storefront bucket, distribution, app-route function, CSP
+│   ├── iam-github-oidc/       API deploy role trusted by GitHub OIDC
+│   └── iam-github-static-deploy/  Storefront deploy role: sync and invalidate only
 ├── user-data/                 Instance boot script, rendered by templatefile()
 └── scripts/                   deploy.sh, add-api.sh, add-keys.sh, uploaded to S3
 scripts/
@@ -396,6 +441,30 @@ Then, once, following the stack's `next_steps` output:
    upstream and virtual host and obtains the certificate.
 4. Deploy. From then on, merging to `main` in adh-shop-api deploys automatically.
 
+### The storefront
+
+It needs the API stack applied first: it reads the image CDN's domain from that state. The
+certificate is validated through DNS in Cloudflare, outside this account, so the first
+apply takes two steps.
+
+```bash
+cp terraform/infrastructures/storefront-static/terraform.tfvars.example \
+   terraform/infrastructures/storefront-static/terraform.tfvars   # then fill it in
+./scripts/tf-init.sh terraform/infrastructures/storefront-static
+
+# 1. The certificate alone, and the record that validates it.
+terraform -chdir=terraform/infrastructures/storefront-static apply -target=aws_acm_certificate.site
+terraform -chdir=terraform/infrastructures/storefront-static output certificate_validation_records
+```
+
+2. In Cloudflare, create that CNAME as **DNS only**.
+3. Apply the rest. It waits until ACM has issued the certificate, then creates the
+   distribution: `terraform -chdir=terraform/infrastructures/storefront-static apply`.
+4. In Cloudflare, create the `site_cname` output as **DNS only**.
+5. In adh-shop-web, create the `production` environment, restricted to `main`, with the
+   `github_environment_variables` output as its variables. From then on, merging to `main`
+   there publishes the storefront.
+
 **Why `tf-init.sh` rather than a backend file.** A `backend` block cannot use variables, so
 the usual `backend.hcl` means either committing the account id to a public repository or
 retyping it. The script derives the bucket from `sts get-caller-identity`, which also rules
@@ -426,6 +495,7 @@ the billing console.
 | ElastiCache Serverless (Valkey) | 6–7 | Minimum billed storage even when idle |
 | KMS customer-managed key | 1.00 | Assets bucket |
 | DynamoDB on-demand, S3, ECR, CloudFront, CloudWatch | < 2 | Pay per use; mostly within free tiers at this volume |
+| Storefront: S3, CloudFront, ACM | < 0.50 | No fixed charge; the public certificate is free, and the bucket uses S3 managed encryption |
 | NAT gateway | 0 | Deliberately absent (~32 would apply otherwise) |
 | **Total** | **≈ 20** | |
 
@@ -438,6 +508,17 @@ so it bought ceremony rather than safety, at the price of four applies in a fixe
 The image CDN in particular belongs with the API: CloudFront verifies signatures the API
 produces, so the key pair, the key group and the parameter the API reads have to be
 created together.
+
+**The storefront as the one exception.** It is released from another repository, by
+another role, and shares nothing with the API but a domain name. In the same state, every
+storefront change would plan against the whole platform, and a mistake there could reach the
+host. Its own stack keeps it to a small, low-risk apply, and it reads the one value it needs
+from the API's state.
+
+**A second CloudFront distribution rather than a behaviour on the image CDN.** The image
+distribution requires a signature on every request; the storefront must not. Their caching
+and headers differ, and sharing one distribution would mean a mistake in either could
+expose the other. A distribution has no fixed cost, so the separation is free.
 
 **A single EC2 host rather than ECS or an auto scaling group.** Cheapest option that still
 gives zero-downtime deploys (blue/green on one host) and automatic rollback. The cost is

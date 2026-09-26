@@ -1,0 +1,11 @@
+# Copy to terraform.tfvars (ignored by git) and fill in.
+
+# The payment gateway's tokenisation host: the origin of cardTokenizationUrl in
+#   curl -s https://adh-api.alfredo-dominguez.dev/api/v1/payment-terms
+payment_gateway_origins = ["https://tokenization.example.com"]
+
+# gh api repos/<owner>/adh-shop-web --jq '{repo: .id, owner: .owner.id}'
+github_repository_owner = "alfredo0607"
+github_repository_name  = "adh-shop-web"
+github_owner_id         = 0
+github_repository_id    = 0
