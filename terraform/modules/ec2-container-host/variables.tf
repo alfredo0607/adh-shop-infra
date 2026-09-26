@@ -101,6 +101,12 @@ variable "tags" {
   default = {}
 }
 
+variable "sqs_send_queue_arns" {
+  type        = list(string)
+  description = "Queues the application may send to"
+  default     = []
+}
+
 variable "dynamodb_table_arns" {
   type        = list(string)
   description = "Tables and indexes the application may read and write"

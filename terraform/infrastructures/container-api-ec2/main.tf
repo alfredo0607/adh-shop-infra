@@ -202,6 +202,7 @@ module "container_host" {
   parameter_path     = local.parameter_path
 
   dynamodb_table_arns = [module.dynamodb.table_arn, "${module.dynamodb.table_arn}/index/*"]
+  sqs_send_queue_arns = [module.payment_notifications.queue_arn]
 
   user_data_base64 = base64encode(templatefile(
     "${path.module}/../../user-data/container-api-ec2/bootstrap.sh",
@@ -393,6 +394,25 @@ resource "aws_kms_key_policy" "assets" {
   })
 }
 
+# ── Payment emails ────────────────────────────────────────────────────────────
+#
+# The API sends an event to the queue when a payment reaches its final status;
+# a Lambda emails the buyer from it. The Gmail credentials live under their own
+# parameter path: deploy.sh turns everything under the API's path into the
+# container's environment, and the API has no business holding them.
+
+module "payment_notifications" {
+  source = "../../modules/payment-notifications"
+
+  name       = "${var.project}-payment-notifications"
+  region     = var.region
+  account_id = local.account_id
+
+  build_dir      = "${path.module}/../../../lambdas/payment-mailer/build"
+  parameter_path = "/${var.project}-mailer"
+  storefront_url = var.storefront_origins[0]
+}
+
 # ── Deployment identity ───────────────────────────────────────────────────────
 #
 # GitHub Actions assumes a role here instead of holding an access key.
@@ -494,6 +514,13 @@ resource "aws_ssm_parameter" "cdn_key_pair_id" {
   name  = "${local.parameter_path}/CDN_KEY_PAIR_ID"
   type  = "String"
   value = module.cdn.key_pair_id
+}
+
+# Without it the API settles payments as before and sends no event.
+resource "aws_ssm_parameter" "payment_events_queue_url" {
+  name  = "${local.parameter_path}/PAYMENT_EVENTS_QUEUE_URL"
+  type  = "String"
+  value = module.payment_notifications.queue_url
 }
 
 resource "aws_ssm_parameter" "redis_host" {

@@ -21,15 +21,16 @@ at `https://adh-api.alfredo-dominguez.dev`. A second, small stack hosts the stor
 5. [The edge: Cloudflare in front of the origin](#the-edge-cloudflare-in-front-of-the-origin)
 6. [Private image delivery](#private-image-delivery)
 7. [Storefront hosting](#storefront-hosting)
-8. [Deployment pipeline](#deployment-pipeline)
-9. [Configuration and secrets](#configuration-and-secrets)
-10. [Security controls](#security-controls)
-11. [Observability](#observability)
-12. [Repository layout](#repository-layout)
-13. [First run](#first-run)
-14. [Operational runbook](#operational-runbook)
-15. [Cost](#cost)
-16. [Decisions and trade-offs](#decisions-and-trade-offs)
+8. [Payment emails](#payment-emails)
+9. [Deployment pipeline](#deployment-pipeline)
+10. [Configuration and secrets](#configuration-and-secrets)
+11. [Security controls](#security-controls)
+12. [Observability](#observability)
+13. [Repository layout](#repository-layout)
+14. [First run](#first-run)
+15. [Operational runbook](#operational-runbook)
+16. [Cost](#cost)
+17. [Decisions and trade-offs](#decisions-and-trade-offs)
 
 ---
 
@@ -269,6 +270,52 @@ on every release, and Cloudflare's TLS in front of a certificate CloudFront alre
 The API is different: its origin is a single instance that must be hidden behind
 Cloudflare.
 
+## Payment emails
+
+When a payment reaches its final status, the buyer gets an email: approved, with the
+products, the amounts, the delivery address and the estimated delivery date; or refused,
+saying nothing was charged. The API does not send it. It hands an event to a queue, and a
+Lambda sends the email.
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant API as API (settlement)
+    participant Q as SQS payment-notifications
+    participant L as Lambda payment-mailer
+    participant SSM as Parameter Store /adh-shop-mailer
+    participant G as Gmail SMTP
+    participant DLQ as Dead-letter queue
+
+    API->>API: store the final status (conditional write, one winner)
+    API->>Q: payment.settled v1 (only the writer that won)
+    Q->>L: one message per invocation, at most 2 at a time
+    L->>SSM: MAIL_USER, MAIL_PASSWORD (first send only)
+    L->>G: nodemailer, app password
+    alt sent
+        L-->>Q: delete the message
+    else failed
+        L-->>Q: report it; retried after the visibility timeout
+        Q->>DLQ: after 3 attempts, and the alarm fires
+    end
+```
+
+| Concern | How |
+| --- | --- |
+| Decoupling | The API answers the buyer once the payment is stored. Gmail being slow or down never delays or fails a payment |
+| Retries | Visibility timeout of 6× the function's timeout; 3 attempts; then the dead-letter queue, kept 4 days, with an alarm on any message in it |
+| Duplicates | Batch size 1 and per-message failure reports, so a failure retries exactly one email. A crash between Gmail accepting and SQS deleting could repeat one email; accepted instead of a deduplication store |
+| Credentials | A Gmail **app password**, in `/adh-shop-mailer`: outside the API's path, so deploy.sh never hands it to the container. Published with `set-mail-credentials.sh`, never through Terraform state |
+| Permissions | The host may only `sqs:SendMessage` to this queue. The function may only consume it, read its two parameters and write its logs |
+| Personal data | Queues encrypted (SQS managed keys, as the table), messages kept 1 day. Logs carry the transaction id, never the buyer's name or address |
+| Throughput | At most 2 concurrent sends, far below Gmail's limits, without reserving account concurrency |
+
+The Lambda's code is in [`lambdas/payment-mailer`](lambdas/payment-mailer): plain
+JavaScript on Node.js 22, `nodemailer` its only dependency, tested with `node:test`
+(coverage gate at 80%). `build.sh` prepares the package and Terraform zips and uploads it,
+so an `apply` deploys a code change like any other change. The plan refuses to run if the
+package was not built.
+
 ## Deployment pipeline
 
 ```mermaid
@@ -335,6 +382,9 @@ with `add-keys.sh` and **never pass through Terraform state**.
 | `PAYMENT_API_URL` | String | `add-keys.sh` |
 | `PAYMENT_PUBLIC_KEY`, `PAYMENT_PRIVATE_KEY`, `PAYMENT_INTEGRITY_SECRET`, `PAYMENT_EVENTS_SECRET` | SecureString | `add-keys.sh` |
 | `CDN_PRIVATE_KEY` | SecureString | `add-keys.sh` |
+| `PAYMENT_EVENTS_QUEUE_URL` | String | Terraform |
+| `/adh-shop-mailer/MAIL_USER` | String | `set-mail-credentials.sh` |
+| `/adh-shop-mailer/MAIL_PASSWORD` (Gmail app password) | SecureString | `set-mail-credentials.sh` |
 
 At deploy time, `deploy.sh` reads `/adh-shop/*` into a file created with `umask 077` and
 removed by a trap, so the values exist on disk only for the seconds Docker needs to read
@@ -400,10 +450,14 @@ terraform/
 │   ├── kms/                   Customer-managed key
 │   ├── cloudfront-cdn/        Distribution, OAC, key group, security headers
 │   ├── static-site/           Storefront bucket, distribution, app-route function, CSP
+│   ├── payment-notifications/ Queue, dead-letter queue, email Lambda, alarm
 │   ├── iam-github-oidc/       API deploy role trusted by GitHub OIDC
 │   └── iam-github-static-deploy/  Storefront deploy role: sync and invalidate only
 ├── user-data/                 Instance boot script, rendered by templatefile()
-└── scripts/                   deploy.sh, add-api.sh, add-keys.sh, uploaded to S3
+└── scripts/                   deploy.sh, add-api.sh, add-keys.sh, uploaded to S3;
+                               payment-mailer/set-mail-credentials.sh, run locally
+lambdas/
+└── payment-mailer/            The email Lambda: source, tests, build.sh
 scripts/
 ├── tf-init.sh                 Initialises a stack against the right state bucket
 └── test-deploy-scripts.sh     Checks the operational scripts
@@ -428,7 +482,8 @@ export AWS_REGION=us-east-1
 terraform -chdir=terraform/bootstrap/remote-state init
 terraform -chdir=terraform/bootstrap/remote-state apply
 
-# 2. The whole platform.
+# 2. The whole platform. The email Lambda's package is built first: Terraform zips it.
+./lambdas/payment-mailer/build.sh
 ./scripts/tf-init.sh terraform/infrastructures/container-api-ec2
 terraform -chdir=terraform/infrastructures/container-api-ec2 apply
 ```
@@ -440,6 +495,9 @@ Then, once, following the stack's `next_steps` output:
 3. Publish the site: `add-api.sh <subdomain> 3000 <email>`, which creates the nginx
    upstream and virtual host and obtains the certificate.
 4. Deploy. From then on, merging to `main` in adh-shop-api deploys automatically.
+5. Publish the Gmail account the payment emails come from:
+   `./terraform/scripts/payment-mailer/set-mail-credentials.sh <gmail address>`, which asks
+   for the app password without echoing it.
 
 ### The storefront
 
@@ -482,6 +540,9 @@ out initialising against another account's state. Locking is native to S3
 | Rotate a secret | `aws ssm put-parameter --overwrite …`, then redeploy so the container reads it |
 | Inspect the host | Session Manager; no SSH key needed |
 | Cloudflare adds IP ranges | Nothing to edit: the next `plan` fetches the new list |
+| Change the email Lambda | Pull request → CI (tests, coverage, audit, build) → merge → `./lambdas/payment-mailer/build.sh` → `plan` → `apply` |
+| Rotate the Gmail app password | Revoke it in the Google account, then `./terraform/scripts/payment-mailer/set-mail-credentials.sh <gmail>`. The function reads it again after its next failed send |
+| Emails in the dead-letter queue | Read the function's logs for the transaction ids, fix the cause, then "Start DLQ redrive" on the queue in the console |
 
 ## Cost
 
@@ -496,6 +557,7 @@ the billing console.
 | KMS customer-managed key | 1.00 | Assets bucket |
 | DynamoDB on-demand, S3, ECR, CloudFront, CloudWatch | < 2 | Pay per use; mostly within free tiers at this volume |
 | Storefront: S3, CloudFront, ACM | < 0.50 | No fixed charge; the public certificate is free, and the bucket uses S3 managed encryption |
+| SQS, Lambda (payment emails) | 0 | Well inside the free tiers; Gmail sends for free |
 | NAT gateway | 0 | Deliberately absent (~32 would apply otherwise) |
 | **Total** | **≈ 20** | |
 
