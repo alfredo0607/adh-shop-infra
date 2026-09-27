@@ -48,12 +48,9 @@ server {
     listen 80;
     server_name $SUBDOMAIN;
 
-    # Security headers applied at the proxy, so every application behind it is
-    # covered whether or not it sets them itself.
-    add_header X-Content-Type-Options    "nosniff"        always;
-    add_header X-Frame-Options           "DENY"           always;
-    add_header Referrer-Policy           "no-referrer"    always;
-    add_header Cross-Origin-Opener-Policy "same-origin"   always;
+    # No security headers here: the application sets all of them, in one place.
+    # Adding them at the proxy as well sent every response two copies, and
+    # X-Frame-Options a contradictory pair when the two disagreed.
 
     location / {
         proxy_pass         http://$APP;
