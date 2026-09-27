@@ -26,6 +26,7 @@ NETWORK = "#8C4FFF"
 STORAGE = "#7AA116"
 SECURITY = "#DD344C"
 MANAGEMENT = "#E7157B"
+INTEGRATION = "#E7157B"
 INK = "#232F3E"
 MUTED = "#545B64"
 
@@ -33,6 +34,10 @@ REQUEST = INK
 DATA = "#147EBA"
 PAYMENT = "#DD344C"
 DEPLOY = NETWORK
+EVENTS = "#D86613"
+
+# The legend column, right of everything else.
+LEGEND_X = 2620
 
 cells: list[str] = []
 _next = [2]
@@ -168,9 +173,10 @@ def edge(src: str, dst: str, colour: str, *, dashed=False, label="", points=(),
 # ── Title ────────────────────────────────────────────────────────────────────
 text("ADH Shop — production architecture on AWS", 40, 18, 900, 34, size=24, bold=True)
 text(
-    "Checkout API for a card-paid storefront · us-east-1 · single-table DynamoDB · "
-    "blue/green on EC2 behind Cloudflare · deployed from GitHub through OIDC",
-    40, 52, 1300, 22, size=13, color=MUTED,
+    "Checkout API and storefront for a card-paid store · us-east-1 · single-table DynamoDB · "
+    "blue/green on EC2 behind Cloudflare · static storefront on CloudFront · "
+    "payment emails through SQS and Lambda · deployed from GitHub through OIDC",
+    40, 52, 2000, 22, size=13, color=MUTED,
 )
 
 # ── Outside AWS ──────────────────────────────────────────────────────────────
@@ -192,7 +198,7 @@ github = box(
 )
 
 # ── AWS Cloud, global edge ───────────────────────────────────────────────────
-group("AWS Cloud", 310, 100, 1580, 1230, "cloud")
+group("AWS Cloud", 310, 100, 2060, 1230, "cloud")
 group("Global · edge locations", 330, 140, 330, 150, "plain")
 cloudfront = service(
     "<b>Amazon CloudFront</b><br>signed URLs only · OAC", 360, 180, "cloudfront", NETWORK
@@ -203,7 +209,7 @@ text(
 )
 
 # ── Region and VPC ───────────────────────────────────────────────────────────
-group("US East (N. Virginia) · us-east-1", 330, 310, 1540, 1000, "region")
+group("US East (N. Virginia) · us-east-1", 330, 310, 2020, 1000, "region")
 group("VPC · 10.20.0.0/16 · no NAT gateway", 355, 355, 935, 930, "vpc")
 
 igw = resource("Internet<br>gateway", 333, 562, "internet_gateway", NETWORK, 44)
@@ -285,6 +291,57 @@ iam = service(
     1760, 990, "identity_and_access_management", SECURITY,
 )
 
+# ── Storefront (its own stack) ───────────────────────────────────────────────
+group("Global · edge locations · storefront", 1880, 140, 450, 150, "plain")
+site_cdn = service(
+    "<b>Amazon CloudFront</b><br>adh-shop.alfredo-dominguez.dev", 2110, 180, "cloudfront", NETWORK
+)
+text(
+    "Its own distribution: no<br>signatures, CSP and HSTS at<br>the edge, app routes → index.html.",
+    1900, 170, 200, 60, size=10, color=MUTED,
+)
+
+group("Storefront hosting", 1880, 355, 450, 330, "plain")
+acm = service(
+    "<b>AWS Certificate Manager</b><br>TLS for the storefront domain",
+    1920, 420, "certificate_manager_3", SECURITY,
+)
+site_bucket = service(
+    "<b>Amazon S3 · storefront</b><br>private · versioned · OAC", 2110, 420, "s3", STORAGE
+)
+text(
+    "Static React build · hashed bundles cached for a year ·<br>index.html revalidated · "
+    "source maps never uploaded",
+    1900, 560, 410, 40, size=10, color=MUTED,
+)
+
+# ── Payment emails ───────────────────────────────────────────────────────────
+group("Payment emails", 1880, 715, 450, 570, "plain")
+queue = service(
+    "<b>Amazon SQS</b><br>payment-notifications<br>encrypted · kept 1 day",
+    1920, 775, "sqs", INTEGRATION,
+)
+mailer = service(
+    "<b>AWS Lambda</b><br>payment-mailer · Node.js 22<br>one message · max 2 at once",
+    2110, 775, "lambda", COMPUTE,
+)
+dead_letters = service(
+    "<b>SQS dead-letter queue</b><br>after 3 failures · 4 days", 1920, 990, "sqs", INTEGRATION
+)
+alarm = service(
+    "<b>CloudWatch alarm</b><br>any dead letter", 2110, 990, "cloudwatch_2", MANAGEMENT
+)
+text(
+    "Gmail app password in Parameter Store under<br>/adh-shop-mailer, outside the API's path.",
+    1900, 1130, 410, 40, size=10, color=MUTED,
+)
+
+group("Outside AWS", 2395, 100, 200, 1230, "plain")
+gmail = box(
+    "<b>Gmail SMTP</b><br>nodemailer · app password<br><font color='#545B64'>→ the buyer's inbox</font>",
+    2410, 770, 170, 66, fill="#FFF4EC", stroke=EVENTS,
+)
+
 # ── Flows ────────────────────────────────────────────────────────────────────
 edge(users, cloudflare, REQUEST, exit=(0.5, 1), entry=(0.35, 0.08))
 badge("1", 75, 400, REQUEST)
@@ -330,8 +387,30 @@ edge(host, s3_endpoint, DEPLOY, dashed=True, exit=(1, 0.8), entry=(0, 0.5),
 edge(s3_endpoint, scripts, DEPLOY, dashed=True, exit=(1, 0.5), entry=(0, 0.5),
      points=[(1326, 822), (1326, 1018)], width=1.4)
 
+# The storefront: the browser loads the static build from its own distribution.
+edge(users, site_cdn, REQUEST, exit=(0.25, 0), entry=(0.5, 0), points=[(74, 128), (2138, 128)])
+badge("9", 1500, 115, REQUEST)
+edge(site_cdn, site_bucket, REQUEST, exit=(0.5, 1), entry=(0.5, 0))
+edge(acm, site_cdn, MUTED, dashed=True, exit=(0.5, 0), entry=(0, 0.75), points=[(1948, 222)],
+     width=1.2)
+
+# Payment emails: the API hands the outcome to a queue and moves on.
+edge(api_blue, queue, EVENTS, exit=(0.8, 1), entry=(0, 0.5),
+     points=[(567, 760), (1895, 760), (1895, 803)])
+badge("10", 1150, 747, EVENTS)
+edge(queue, mailer, EVENTS, exit=(1, 0.5), entry=(0, 0.5))
+edge(mailer, gmail, EVENTS, exit=(1, 0.5), entry=(0, 0.5))
+badge("11", 2185, 790, EVENTS)
+edge(queue, dead_letters, EVENTS, dashed=True, exit=(0.5, 1), entry=(0.5, 0), width=1.2)
+edge(dead_letters, alarm, MUTED, dashed=True, exit=(1, 0.5), entry=(0, 0.5), width=1.2)
+
+# The storefront's release: its own role, its own bucket.
+edge(github, site_bucket, DEPLOY, dashed=True, exit=(1, 0.75), entry=(1, 0.5),
+     points=[(290, 1212), (290, 1318), (2335, 1318), (2335, 448)])
+badge("E", 2322, 1100, DEPLOY)
+
 # ── Legend ───────────────────────────────────────────────────────────────────
-group("How it works", 1915, 100, 390, 1230, "plain")
+group("How it works", LEGEND_X - 20, 100, 390, 1230, "plain")
 steps = [
     ("1", REQUEST, "Customers reach the API through <b>Cloudflare</b>: proxied DNS, TLS, WAF and DDoS protection."),
     ("2", REQUEST, "The host accepts <b>443 only from Cloudflare's IP ranges</b>, so nobody can reach it around the edge or forge the client address."),
@@ -341,43 +420,49 @@ steps = [
     ("6", PAYMENT, "The API charges a <b>card token</b> (card data never reaches AWS), signed with the integrity secret, and polls the outcome."),
     ("7", PAYMENT, "The gateway pushes <b>signed events</b> back through Cloudflare to the webhook."),
     ("8", DATA, "Product images: browser → <b>CloudFront</b> with a signed, expiring URL → private S3 through Origin Access Control, KMS-encrypted."),
+    ("9", REQUEST, "The storefront: its own <b>CloudFront</b> distribution, ACM certificate and CSP, serving the static build from a private S3 bucket."),
+    ("10", EVENTS, "A final payment is sent to <b>SQS</b> as payment.settled, once, by the write that stored it. Best effort: it never fails the payment."),
+    ("11", EVENTS, "A <b>Lambda</b> emails the buyer through Gmail. Failures retry; after 3 they wait in the dead-letter queue, and the alarm fires."),
 ]
 deploy_steps = [
     ("A", "GitHub Actions assumes an <b>IAM role through OIDC</b>. No AWS keys are stored in GitHub."),
     ("B", "It pushes the image to <b>ECR</b>, tagged with the commit SHA. Tags are immutable."),
     ("C", "<b>SSM Run Command</b> runs deploy.sh on the host. No SSH, no open admin port needed."),
     ("D", "The host pulls the image, reads /adh-shop/* from <b>Parameter Store</b>, starts the idle colour and switches only when <b>/ready</b> reads DynamoDB."),
+    ("E", "The storefront's workflow assumes <b>its own OIDC role</b>: sync the build to its bucket and invalidate its distribution, nothing else."),
 ]
 
+STEP = 60
 y = 140
-text("<b>Checkout request path</b>", 1935, y, 350, 22, size=13)
+text("<b>Request path</b>", LEGEND_X, y, 350, 22, size=13)
 y += 30
 for label, colour, body in steps:
-    badge(label, 1935, y, colour)
-    text(body, 1970, y - 6, 320, 64, size=11)
-    y += 74
+    badge(label, LEGEND_X, y, colour)
+    text(body, LEGEND_X + 35, y - 6, 320, 58, size=11)
+    y += STEP
 y += 10
-text("<b>Deployment</b>", 1935, y, 350, 22, size=13)
+text("<b>Deployment</b>", LEGEND_X, y, 350, 22, size=13)
 y += 30
 for label, body in deploy_steps:
-    badge(label, 1935, y, DEPLOY)
-    text(body, 1970, y - 6, 320, 64, size=11)
-    y += 74
+    badge(label, LEGEND_X, y, DEPLOY)
+    text(body, LEGEND_X + 35, y - 6, 320, 58, size=11)
+    y += STEP
 
 y += 6
-text("<b>Lines</b>", 1935, y, 350, 22, size=13)
+text("<b>Lines</b>", LEGEND_X, y, 350, 22, size=13)
 y += 28
 for colour, dashed, meaning in [
     (REQUEST, False, "Customer traffic"),
     (DATA, False, "Data and images"),
     (PAYMENT, False, "Payment gateway"),
+    (EVENTS, False, "Payment emails (asynchronous)"),
     (DEPLOY, True, "Deployment and operations"),
 ]:
-    a = _cell("", "text;strokeColor=none;fillColor=none;", 1935, y + 8, 1, 1)
-    b = _cell("", "text;strokeColor=none;fillColor=none;", 1995, y + 8, 1, 1)
+    a = _cell("", "text;strokeColor=none;fillColor=none;", LEGEND_X, y + 8, 1, 1)
+    b = _cell("", "text;strokeColor=none;fillColor=none;", LEGEND_X + 60, y + 8, 1, 1)
     edge(a, b, colour, dashed=dashed)
-    text(meaning, 2005, y - 2, 280, 20, size=11)
-    y += 26
+    text(meaning, LEGEND_X + 70, y - 2, 280, 20, size=11)
+    y += 22
 
 text(
     "Source: docs/diagrams/architecture.drawio · open and edit in diagrams.net",
@@ -389,7 +474,7 @@ xml = (
     '<mxfile host="build_architecture.py" type="device">'
     '<diagram id="architecture" name="AWS architecture">'
     '<mxGraphModel dx="2400" dy="1400" grid="1" gridSize="10" guides="1" tooltips="1" '
-    'connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="2340" '
+    'connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="3030" '
     'pageHeight="1380" background="#FFFFFF" math="0" shadow="0"><root>'
     '<mxCell id="0"/><mxCell id="1" parent="0"/>'
     + "".join(cells)

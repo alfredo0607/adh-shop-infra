@@ -39,9 +39,10 @@ at `https://adh-api.alfredo-dominguez.dev`. A second, small stack hosts the stor
 ![ADH Shop AWS architecture](docs/architecture.png)
 
 The numbered steps are explained in the panel on the right of the diagram: **1–8** follow a
-checkout request, and **A–D** follow a release from GitHub to the host. Line colours: black
-for customer traffic, blue for data and images, red for the payment gateway, dashed purple
-for deployment and operations.
+checkout request, **9** the storefront, **10–11** the payment emails, and **A–E** follow a
+release from GitHub to the host and to the storefront's bucket. Line colours: black for
+customer traffic, blue for data and images, red for the payment gateway, orange for the
+payment emails, dashed purple for deployment and operations.
 
 The diagram uses the official AWS 2024 icon set and group conventions (AWS Cloud, Region,
 VPC, Availability Zones, public and private subnets, security group). Its source is
@@ -56,9 +57,12 @@ the loopback interface. The instance accepts HTTPS **only from Cloudflare's IP r
 so nobody can reach it around the edge. The API keeps its data in DynamoDB, reached
 privately through a VPC gateway endpoint, and its rate-limit counters in an ElastiCache
 Valkey cache that has no route to the internet at all. Product images sit in a private S3
-bucket behind CloudFront, served only through URLs the API signs. GitHub Actions deploys
-without any stored AWS key: it assumes a role through OIDC, pushes the image to ECR, and
-tells the host through SSM to run a blue/green switch.
+bucket behind CloudFront, served only through URLs the API signs. The storefront itself is
+a static build in another private bucket, behind its own CloudFront distribution. When a
+payment is final, the API drops an event on SQS and a Lambda emails the buyer through
+Gmail. GitHub Actions deploys without any stored AWS key: it assumes a role through OIDC,
+pushes the image to ECR, and tells the host through SSM to run a blue/green switch; the
+storefront's workflow syncs its bucket with a role of its own.
 
 ## How a request travels
 
