@@ -1,15 +1,37 @@
 {
-  "name": "payment-mailer",
+  "name": "adh-shop-payment-mailer",
   "version": "1.0.0",
   "private": true,
   "description": "Emails the buyer when a payment is approved or refused, from the API's payment events",
+  "keywords": [
+    "aws-lambda",
+    "sqs",
+    "nodemailer",
+    "email"
+  ],
+  "bugs": {
+    "url": "https://github.com/alfredo0607/adh-shop-infra/issues"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/alfredo0607/adh-shop-infra.git",
+    "directory": "lambdas/payment-mailer"
+  },
+  "license": "MIT",
+  "author": {
+    "name": "Alfredo José Domínguez Hernández",
+    "url": "https://github.com/alfredo0607"
+  },
   "type": "module",
   "main": "src/handler.mjs",
   "engines": {
-    "node": ">=22"
+    "node": "^22 || ^24"
   },
   "scripts": {
-    "test": "node --test --experimental-test-coverage --test-coverage-lines=80 --test-coverage-branches=80 --test-coverage-include=src/**"
+    "test": "node --test --experimental-test-coverage --test-coverage-lines=80 --test-coverage-branches=80 --test-coverage-include=src/**",
+    "test:watch": "node --test --watch",
+    "build": "bash build.sh",
+    "check": "npm test && npm audit --omit=dev --audit-level=high && npm run build"
   },
   "dependencies": {
     "nodemailer": "10.0.10"
