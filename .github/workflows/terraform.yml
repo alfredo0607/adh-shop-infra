@@ -126,6 +126,7 @@ jobs:
         run: npm audit --omit=dev --audit-level=high
 
       # The package Terraform zips: proves it builds with production
-      # dependencies only.
+      # dependencies only. Each step is a package.json script, so a local
+      # `npm run check` runs the same three.
       - name: Build the package
-        run: ./build.sh
+        run: npm run build
